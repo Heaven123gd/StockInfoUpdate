@@ -251,9 +251,11 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 # =====================
 with tab1:
     st.header("中国上市公司市场统计")
-    
-    # 缓存数据或刷新
-    if refresh_btn or 'sse_data' not in st.session_state:
+
+    # 懒加载：只有点击按钮时才加载数据
+    load_tab1 = st.button("📥 加载市场统计数据", key='load_tab1') if 'sse_data' not in st.session_state else False
+
+    if refresh_btn or load_tab1:
         with st.spinner("正在获取上交所数据..."):
             try:
                 st.session_state.sse_data = fetch_sse_summary()
@@ -261,7 +263,7 @@ with tab1:
             except Exception as e:
                 st.session_state.sse_data = None
                 st.session_state.sse_error = str(e)
-        
+
         with st.spinner("正在获取深交所数据..."):
             try:
                 st.session_state.szse_data = fetch_szse_summary(market_date_str)
@@ -269,25 +271,31 @@ with tab1:
             except Exception as e:
                 st.session_state.szse_data = None
                 st.session_state.szse_error = str(e)
-    
+
     # 显示数据或错误
     if st.session_state.get('sse_error'):
         st.error(f"上交所数据获取失败: {st.session_state.sse_error}")
     if st.session_state.get('szse_error'):
         st.error(f"深交所数据获取失败: {st.session_state.szse_error}")
-    
-    display_market_summary(
-        st.session_state.get('sse_data'),
-        st.session_state.get('szse_data')
-    )
+
+    if st.session_state.get('sse_data') is not None or st.session_state.get('szse_data') is not None:
+        display_market_summary(
+            st.session_state.get('sse_data'),
+            st.session_state.get('szse_data')
+        )
+    elif 'sse_data' not in st.session_state:
+        st.info("👆 点击上方按钮加载数据")
 
 # =====================
 # Tab 2: 净利润100强
 # =====================
 with tab2:
     st.header(f"A股归母净利润100强 ({selected_report})")
-    
-    if refresh_btn or 'profit_top100' not in st.session_state:
+
+    # 懒加载
+    load_tab2 = st.button("📥 加载净利润100强数据", key='load_tab2') if 'profit_top100' not in st.session_state else False
+
+    if refresh_btn or load_tab2:
         with st.spinner("正在获取业绩数据，请稍候..."):
             try:
                 st.session_state.profit_top100 = fetch_profit_top100(report_date_str)
@@ -295,25 +303,25 @@ with tab2:
             except Exception as e:
                 st.session_state.profit_top100 = None
                 st.session_state.profit_error = str(e)
-    
+
     if st.session_state.get('profit_error'):
         st.error(f"获取数据失败: {st.session_state.profit_error}")
-    else:
+    elif st.session_state.get('profit_top100') is not None:
         display_profit_top100(st.session_state.get('profit_top100'))
+    elif 'profit_top100' not in st.session_state:
+        st.info("👆 点击上方按钮加载数据")
 
 # =====================
 # Tab 3: 利润分布
 # =====================
 with tab3:
     st.header(f"净利润行业分布分析 ({selected_report})")
-    
-    # 使用 profit_top100 的原始完整数据计算分布
-    if refresh_btn or 'profit_dist' not in st.session_state:
-        if st.session_state.get('profit_top100') is not None:
+
+    # 使用 profit_top100 的原始完整数据计算分布（依赖 Tab2 的数据）
+    if st.session_state.get('profit_top100') is not None:
+        if refresh_btn or 'profit_dist' not in st.session_state:
             with st.spinner("正在计算利润分布..."):
                 try:
-                    # 注意：这里应该使用全量数据，不仅仅是top100
-                    # 但为简化，先用top100数据演示
                     result_df, pie_data = calculate_profit_distribution(
                         st.session_state.profit_top100
                     )
@@ -322,12 +330,12 @@ with tab3:
                 except Exception as e:
                     st.session_state.profit_dist = None
                     st.session_state.dist_error = str(e)
-    
-    if st.session_state.get('dist_error'):
-        st.error(f"计算分布失败: {st.session_state.dist_error}")
-    elif st.session_state.get('profit_dist'):
-        result_df, pie_data = st.session_state.profit_dist
-        display_profit_distribution(result_df, pie_data)
+
+        if st.session_state.get('dist_error'):
+            st.error(f"计算分布失败: {st.session_state.dist_error}")
+        elif st.session_state.get('profit_dist'):
+            result_df, pie_data = st.session_state.profit_dist
+            display_profit_distribution(result_df, pie_data)
     else:
         st.info("请先在「净利润100强」页面加载数据")
 
@@ -349,8 +357,10 @@ with tab4:
     if uploaded_indices:
         st.success(f"📤 使用上传的数据: {', '.join(uploaded_indices)}")
 
-    # 获取指数数据
-    if refresh_btn or 'index_data' not in st.session_state:
+    # 懒加载
+    load_tab4 = st.button("📥 加载指数走势数据", key='load_tab4') if 'index_data' not in st.session_state else False
+
+    if refresh_btn or load_tab4:
         with st.spinner("正在获取指数数据，请稍候（数据量较大）..."):
             try:
                 index_data, index_errors = fetch_all_index_data(
@@ -382,8 +392,10 @@ with tab4:
             st.session_state.index_data,
             st.session_state.get('index_errors', {})
         )
+    elif 'index_data' not in st.session_state:
+        st.info("👆 点击上方按钮加载数据")
     else:
-        st.warning("暂无指数数据，请点击「刷新所有数据」按钮")
+        st.warning("暂无指数数据")
 
 # =====================
 # Tab 5: 概率分布图（通胀调整与回归分析）
@@ -393,10 +405,11 @@ with tab5:
     st.markdown(f"**数据范围:** {index_start_date.strftime('%Y-%m-%d')} ~ 今")
     st.markdown("对指数进行通胀调整（去除CPI影响）和对数化处理，然后进行OLS线性回归分析。")
 
-    # 获取 CPI 数据并进行通胀调整
-    if refresh_btn or 'adjusted_data' not in st.session_state:
-        # 首先确保指数数据已加载
-        if st.session_state.get('index_data'):
+    # 懒加载（依赖 Tab4 的指数数据）
+    if st.session_state.get('index_data'):
+        load_tab5 = st.button("📥 加载概率分布分析", key='load_tab5') if 'adjusted_data' not in st.session_state else False
+
+        if refresh_btn or load_tab5:
             with st.spinner("正在获取CPI数据..."):
                 try:
                     cpi_yearly = fetch_cpi_yearly()
@@ -422,21 +435,21 @@ with tab5:
                         st.session_state.regression_results = {}
                         st.session_state.adj_errors = {'系统错误': str(e)}
 
-    # 显示错误信息
-    if st.session_state.get('cpi_error'):
-        st.error(f"CPI数据获取失败: {st.session_state.cpi_error}")
+        # 显示错误信息
+        if st.session_state.get('cpi_error'):
+            st.error(f"CPI数据获取失败: {st.session_state.cpi_error}")
 
-    # 显示分析结果
-    if st.session_state.get('adjusted_data') and st.session_state.get('regression_results'):
-        display_index_distribution(
-            st.session_state.adjusted_data,
-            st.session_state.regression_results,
-            st.session_state.get('adj_errors', {})
-        )
-    elif st.session_state.get('index_data') is None or len(st.session_state.get('index_data', {})) == 0:
-        st.info("请先点击「刷新所有数据」按钮加载指数数据")
+        # 显示分析结果
+        if st.session_state.get('adjusted_data') and st.session_state.get('regression_results'):
+            display_index_distribution(
+                st.session_state.adjusted_data,
+                st.session_state.regression_results,
+                st.session_state.get('adj_errors', {})
+            )
+        elif 'adjusted_data' not in st.session_state:
+            st.info("👆 点击上方按钮加载数据")
     else:
-        st.warning("暂无分析数据，请点击「刷新所有数据」按钮")
+        st.info("请先在「指数走势」页面加载指数数据")
 
 # =====================
 # Tab 6: 指数对比分析
@@ -452,58 +465,56 @@ with tab6:
     else:
         st.caption("📂 道琼斯工业指数: 使用默认本地数据")
 
-    # 获取道琼斯工业指数数据
-    if refresh_btn or 'dji_data' not in st.session_state:
-        with st.spinner("正在获取道琼斯工业指数数据..."):
-            try:
-                # 优先使用上传的数据
-                if st.session_state.get('uploaded_dji_data') is not None:
-                    dji_data = st.session_state.uploaded_dji_data
-                else:
-                    dji_data = fetch_dji_index(data_dir='.')
-                st.session_state.dji_data = dji_data
-                st.session_state.dji_error = None
-            except Exception as e:
-                st.session_state.dji_data = None
-                st.session_state.dji_error = str(e)
+    # 懒加载（依赖 Tab4 的指数数据）
+    if st.session_state.get('index_data'):
+        load_tab6 = st.button("📥 加载指数对比数据", key='load_tab6') if 'comparison_data' not in st.session_state else False
 
-    # 准备对比数据
-    if refresh_btn or 'comparison_data' not in st.session_state:
-        if st.session_state.get('index_data') and st.session_state.get('dji_data') is not None:
-            with st.spinner("正在计算归一化对比数据..."):
+        if refresh_btn or load_tab6:
+            # 获取道琼斯工业指数数据
+            with st.spinner("正在获取道琼斯工业指数数据..."):
                 try:
-                    comparison_data, comparison_errors = prepare_all_index_comparisons(
-                        st.session_state.index_data,
-                        st.session_state.dji_data
-                    )
-                    st.session_state.comparison_data = comparison_data
-                    st.session_state.comparison_errors = comparison_errors
+                    if st.session_state.get('uploaded_dji_data') is not None:
+                        dji_data = st.session_state.uploaded_dji_data
+                    else:
+                        dji_data = fetch_dji_index(data_dir='.')
+                    st.session_state.dji_data = dji_data
+                    st.session_state.dji_error = None
                 except Exception as e:
-                    st.session_state.comparison_data = {}
-                    st.session_state.comparison_errors = {'系统错误': str(e)}
+                    st.session_state.dji_data = None
+                    st.session_state.dji_error = str(e)
 
-    # 显示错误信息
-    if st.session_state.get('dji_error'):
-        st.error(f"道琼斯工业指数数据获取失败: {st.session_state.dji_error}")
+            # 准备对比数据
+            if st.session_state.get('dji_data') is not None:
+                with st.spinner("正在计算归一化对比数据..."):
+                    try:
+                        comparison_data, comparison_errors = prepare_all_index_comparisons(
+                            st.session_state.index_data,
+                            st.session_state.dji_data
+                        )
+                        st.session_state.comparison_data = comparison_data
+                        st.session_state.comparison_errors = comparison_errors
+                    except Exception as e:
+                        st.session_state.comparison_data = {}
+                        st.session_state.comparison_errors = {'系统错误': str(e)}
 
-    # 获取对比数据和错误信息
-    comparison_data = st.session_state.get('comparison_data', {})
-    comparison_errors = st.session_state.get('comparison_errors', {})
+        # 显示错误信息
+        if st.session_state.get('dji_error'):
+            st.error(f"道琼斯工业指数数据获取失败: {st.session_state.dji_error}")
 
-    # 显示对比图表
-    if comparison_data:
-        display_index_comparison(comparison_data, comparison_errors)
-    elif comparison_errors:
-        # 显示具体的错误信息
-        st.error("数据处理出现问题：")
-        for name, err in comparison_errors.items():
-            st.warning(f"⚠️ {name}: {err}")
-    elif st.session_state.get('index_data') is None or len(st.session_state.get('index_data', {})) == 0:
-        st.info("请先点击「刷新所有数据」按钮加载指数数据")
-    elif st.session_state.get('dji_data') is None:
-        st.warning("道琼斯工业指数数据加载失败，请检查本地Excel文件")
+        # 显示对比图表
+        comparison_data = st.session_state.get('comparison_data', {})
+        comparison_errors = st.session_state.get('comparison_errors', {})
+
+        if comparison_data:
+            display_index_comparison(comparison_data, comparison_errors)
+        elif comparison_errors:
+            st.error("数据处理出现问题：")
+            for name, err in comparison_errors.items():
+                st.warning(f"⚠️ {name}: {err}")
+        elif 'comparison_data' not in st.session_state:
+            st.info("👆 点击上方按钮加载数据")
     else:
-        st.warning("暂无对比数据，请点击「刷新所有数据」按钮")
+        st.info("请先在「指数走势」页面加载指数数据")
 
 # =====================
 # Tab 7: 主要股票基本面数据
