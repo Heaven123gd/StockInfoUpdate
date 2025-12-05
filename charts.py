@@ -9,11 +9,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.dates as mdates
+from matplotlib import font_manager
 from typing import Dict
 from config import PIE_COLORS, INDEX_COLORS, CONFIDENCE_SIGMA, COMPARISON_START_DATE
+import os
 
 # 设置 matplotlib 中文字体
-matplotlib.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'STHeiti']
+# 优先使用项目自带的 SimHei 字体（用于云端部署）
+FONT_PATH = os.path.join(os.path.dirname(__file__), 'fonts', 'SimHei.ttf')
+if os.path.exists(FONT_PATH):
+    font_manager.fontManager.addfont(FONT_PATH)
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+else:
+    # 本地开发时使用系统字体
+    matplotlib.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'STHeiti']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 
