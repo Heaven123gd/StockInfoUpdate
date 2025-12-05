@@ -1212,105 +1212,148 @@ def fetch_stock_financial_indicator_em_yearly(symbol: str) -> pd.DataFrame:
         return pd.DataFrame({'error': [str(e)]})
 
 
-def fetch_all_featured_stocks_data() -> Tuple[pd.DataFrame, Dict]:
+def _fetch_single_stock_data(name: str, symbol: str) -> Tuple[pd.DataFrame, Dict]:
     """
-    获取所有重点关注股票的多年年报基本面数据
+    获取单只股票的基本面数据（用于并行请求）
+
+    Args:
+        name: 股票名称
+        symbol: 股票代码
+
+    Returns:
+        Tuple: (股票DataFrame, 错误信息Dict)
+    """
+    errors = {}
+
+    try:
+        # 使用 ThreadPoolExecutor 并行获取5个数据源
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        futures_map = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures_map['ths'] = executor.submit(fetch_stock_financial_abstract_ths_yearly, symbol)
+            futures_map['sina'] = executor.submit(fetch_stock_financial_abstract_yearly, symbol)
+            futures_map['balance'] = executor.submit(fetch_stock_balance_sheet_yearly, symbol)
+            futures_map['indicator'] = executor.submit(fetch_stock_financial_indicator_yearly, symbol)
+            futures_map['em'] = executor.submit(fetch_stock_financial_indicator_em_yearly, symbol)
+
+        # 收集结果
+        results = {}
+        for key, future in futures_map.items():
+            try:
+                results[key] = future.result(timeout=30)
+            except Exception as e:
+                errors[f"{name}_{key}"] = str(e)
+                results[key] = pd.DataFrame()
+
+        # 处理结果
+        ths_df = results.get('ths', pd.DataFrame())
+        sina_df = results.get('sina', pd.DataFrame())
+        balance_df = results.get('balance', pd.DataFrame())
+        indicator_df = results.get('indicator', pd.DataFrame())
+        em_df = results.get('em', pd.DataFrame())
+
+        # 检查错误
+        if not ths_df.empty and 'error' in ths_df.columns:
+            errors[f"{name}_ths"] = ths_df['error'].iloc[0]
+            ths_df = pd.DataFrame()
+        if not sina_df.empty and 'error' in sina_df.columns:
+            errors[f"{name}_sina"] = sina_df['error'].iloc[0]
+            sina_df = pd.DataFrame()
+        if not indicator_df.empty and 'error' in indicator_df.columns:
+            errors[f"{name}_indicator"] = indicator_df['error'].iloc[0]
+            indicator_df = pd.DataFrame()
+        if not em_df.empty and 'error' in em_df.columns:
+            errors[f"{name}_em"] = em_df['error'].iloc[0]
+            em_df = pd.DataFrame()
+
+        # 合并数据 - 以同花顺数据为基础，按报告期合并
+        if not ths_df.empty:
+            merged_df = ths_df.copy()
+            merged_df['报告期'] = merged_df['报告期'].astype(str).str.replace('-', '')
+
+            if not sina_df.empty:
+                sina_df['报告期'] = sina_df['报告期'].astype(str).str.replace('-', '')
+                merged_df = pd.merge(merged_df, sina_df, on='报告期', how='outer')
+
+            if not balance_df.empty:
+                balance_df['报告期'] = balance_df['报告期'].astype(str).str.replace('-', '')
+                merged_df = pd.merge(merged_df, balance_df, on='报告期', how='outer')
+
+            if not indicator_df.empty:
+                indicator_df['报告期'] = indicator_df['报告期'].astype(str).str.replace('-', '')
+                merged_df = pd.merge(merged_df, indicator_df, on='报告期', how='outer')
+
+            if not em_df.empty:
+                em_df['报告期'] = em_df['报告期'].astype(str).str.replace('-', '')
+                merged_df = pd.merge(merged_df, em_df, on='报告期', how='outer')
+
+            merged_df['股票名称'] = name
+            merged_df['股票代码'] = symbol
+            merged_df['报告期'] = merged_df['报告期'].apply(
+                lambda x: f"{str(x)[:4]}年年报" if len(str(x)) >= 8 else str(x)
+            )
+            return merged_df, errors
+        elif not sina_df.empty:
+            sina_df['股票名称'] = name
+            sina_df['股票代码'] = symbol
+            sina_df['报告期'] = sina_df['报告期'].apply(
+                lambda x: f"{str(x)[:4]}年年报" if len(str(x)) >= 8 else str(x)
+            )
+            return sina_df, errors
+
+    except Exception as e:
+        errors[name] = str(e)
+
+    return pd.DataFrame(), errors
+
+
+def fetch_all_featured_stocks_data(progress_callback=None) -> Tuple[pd.DataFrame, Dict]:
+    """
+    获取所有重点关注股票的多年年报基本面数据（并行优化版本）
+
+    Args:
+        progress_callback: 进度回调函数，接收 (当前进度, 总数, 股票名称)
 
     Returns:
         Tuple: (汇总DataFrame, 错误信息Dict)
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     all_data = []
     errors = {}
+    stocks_list = list(FEATURED_STOCKS.items())
+    total = len(stocks_list)
 
-    for name, symbol in FEATURED_STOCKS.items():
-        try:
-            # 1. 获取同花顺财务摘要（多年）- 每行是一个报告期
-            ths_df = fetch_stock_financial_abstract_ths_yearly(symbol)
-            if not ths_df.empty and 'error' in ths_df.columns:
-                errors[f"{name}_ths"] = ths_df['error'].iloc[0]
-                ths_df = pd.DataFrame()
+    # 并行获取所有股票数据
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_stock = {
+            executor.submit(_fetch_single_stock_data, name, symbol): (name, symbol)
+            for name, symbol in stocks_list
+        }
 
-            # 2. 获取新浪财务摘要（多年）- 每行是一个指标，报告期作为列
-            sina_df = fetch_stock_financial_abstract_yearly(symbol)
-            if not sina_df.empty and 'error' in sina_df.columns:
-                errors[f"{name}_sina"] = sina_df['error'].iloc[0]
-                sina_df = pd.DataFrame()
+        completed = 0
+        for future in as_completed(future_to_stock):
+            name, symbol = future_to_stock[future]
+            completed += 1
 
-            # 3. 获取资产负债表数据（多年）
-            balance_df = fetch_stock_balance_sheet_yearly(symbol)
+            if progress_callback:
+                progress_callback(completed, total, name)
 
-            # 4. 获取财务分析指标（多年）
-            indicator_df = fetch_stock_financial_indicator_yearly(symbol)
-            if not indicator_df.empty and 'error' in indicator_df.columns:
-                errors[f"{name}_indicator"] = indicator_df['error'].iloc[0]
-                indicator_df = pd.DataFrame()
-
-            # 5. 获取东方财富财务指标（多年）
-            em_df = fetch_stock_financial_indicator_em_yearly(symbol)
-            if not em_df.empty and 'error' in em_df.columns:
-                errors[f"{name}_em"] = em_df['error'].iloc[0]
-                em_df = pd.DataFrame()
-
-            # 合并数据 - 以同花顺数据为基础，按报告期合并
-            if not ths_df.empty:
-                merged_df = ths_df.copy()
-
-                # 标准化报告期格式（去掉横线）
-                merged_df['报告期'] = merged_df['报告期'].astype(str).str.replace('-', '')
-
-                # 合并新浪数据
-                if not sina_df.empty:
-                    sina_df['报告期'] = sina_df['报告期'].astype(str).str.replace('-', '')
-                    merged_df = pd.merge(merged_df, sina_df, on='报告期', how='outer')
-
-                # 合并资产负债表数据
-                if not balance_df.empty:
-                    balance_df['报告期'] = balance_df['报告期'].astype(str).str.replace('-', '')
-                    merged_df = pd.merge(merged_df, balance_df, on='报告期', how='outer')
-
-                # 合并财务分析指标
-                if not indicator_df.empty:
-                    indicator_df['报告期'] = indicator_df['报告期'].astype(str).str.replace('-', '')
-                    merged_df = pd.merge(merged_df, indicator_df, on='报告期', how='outer')
-
-                # 合并东方财富指标
-                if not em_df.empty:
-                    em_df['报告期'] = em_df['报告期'].astype(str).str.replace('-', '')
-                    merged_df = pd.merge(merged_df, em_df, on='报告期', how='outer')
-
-                # 添加股票信息
-                merged_df['股票名称'] = name
-                merged_df['股票代码'] = symbol
-
-                # 格式化报告期显示
-                merged_df['报告期'] = merged_df['报告期'].apply(
-                    lambda x: f"{str(x)[:4]}年年报" if len(str(x)) >= 8 else str(x)
-                )
-
-                all_data.append(merged_df)
-            else:
-                # 如果同花顺数据为空，尝试新浪数据
-                if not sina_df.empty:
-                    sina_df['股票名称'] = name
-                    sina_df['股票代码'] = symbol
-                    sina_df['报告期'] = sina_df['报告期'].apply(
-                        lambda x: f"{str(x)[:4]}年年报" if len(str(x)) >= 8 else str(x)
-                    )
-                    all_data.append(sina_df)
-
-        except Exception as e:
-            errors[name] = str(e)
+            try:
+                stock_df, stock_errors = future.result(timeout=60)
+                errors.update(stock_errors)
+                if not stock_df.empty:
+                    all_data.append(stock_df)
+            except Exception as e:
+                errors[name] = str(e)
 
     # 合并所有股票数据
     if all_data:
         final_df = pd.concat(all_data, ignore_index=True)
-
-        # 重新排列列顺序
         first_cols = ['股票名称', '股票代码', '报告期']
         other_cols = [col for col in final_df.columns if col not in first_cols]
         final_df = final_df[first_cols + other_cols]
-
-        # 按股票名称和报告期排序
         final_df = final_df.sort_values(['股票名称', '报告期'], ascending=[True, False])
     else:
         final_df = pd.DataFrame()
@@ -1390,26 +1433,46 @@ def fetch_us_stock_operating_cycle(symbol: str, name: str = None) -> pd.DataFram
         return pd.DataFrame({'error': [f'{symbol} 获取失败: {str(e)}']})
 
 
-def fetch_all_us_stocks_data() -> Tuple[pd.DataFrame, Dict]:
+def fetch_all_us_stocks_data(progress_callback=None) -> Tuple[pd.DataFrame, Dict]:
     """
-    获取所有美股重点关注股票的经营周期数据
+    获取所有美股重点关注股票的经营周期数据（并行优化版本）
+
+    Args:
+        progress_callback: 进度回调函数，接收 (当前进度, 总数, 股票名称)
 
     Returns:
         Tuple: (汇总DataFrame, 错误信息Dict)
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     all_data = []
     errors = {}
+    stocks_list = list(US_FEATURED_STOCKS.items())
+    total = len(stocks_list)
 
-    for name, symbol in US_FEATURED_STOCKS.items():
-        try:
-            df = fetch_us_stock_operating_cycle(symbol, name)
+    # 并行获取所有美股数据
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_to_stock = {
+            executor.submit(fetch_us_stock_operating_cycle, symbol, name): (name, symbol)
+            for name, symbol in stocks_list
+        }
 
-            if not df.empty and 'error' in df.columns:
-                errors[name] = df['error'].iloc[0]
-            elif not df.empty:
-                all_data.append(df)
-        except Exception as e:
-            errors[name] = str(e)
+        completed = 0
+        for future in as_completed(future_to_stock):
+            name, _ = future_to_stock[future]
+            completed += 1
+
+            if progress_callback:
+                progress_callback(completed, total, name)
+
+            try:
+                df = future.result(timeout=30)
+                if not df.empty and 'error' in df.columns:
+                    errors[name] = df['error'].iloc[0]
+                elif not df.empty:
+                    all_data.append(df)
+            except Exception as e:
+                errors[name] = str(e)
 
     if all_data:
         final_df = pd.concat(all_data, ignore_index=True)

@@ -521,6 +521,7 @@ with tab6:
 # =====================
 with tab7:
     st.header("🏢 主要股票基本面数据")
+    st.caption("⚡ 数据并行加载，加载速度已优化")
 
     # 刷新按钮
     refresh_stocks_btn = st.button("🔄 刷新股票数据", key='refresh_stocks')
@@ -531,16 +532,23 @@ with tab7:
     st.subheader("🇨🇳 A股重点股票")
     st.markdown("比亚迪、美的集团、海尔智家、格力电器")
 
-    # 加载A股数据
+    # 加载A股数据（带进度条）
     if refresh_stocks_btn or 'featured_stocks_data' not in st.session_state:
-        with st.spinner("正在获取A股基本面数据..."):
-            try:
-                stocks_df, stocks_errors = fetch_all_featured_stocks_data()
-                st.session_state.featured_stocks_data = stocks_df
-                st.session_state.featured_stocks_errors = stocks_errors
-            except Exception as e:
-                st.session_state.featured_stocks_data = None
-                st.session_state.featured_stocks_errors = {'系统错误': str(e)}
+        a_progress = st.progress(0, text="正在并行获取A股基本面数据...")
+        a_status = st.empty()
+
+        try:
+            stocks_df, stocks_errors = fetch_all_featured_stocks_data()
+            st.session_state.featured_stocks_data = stocks_df
+            st.session_state.featured_stocks_errors = stocks_errors
+            a_progress.progress(100, text="✅ A股数据加载完成")
+        except Exception as e:
+            st.session_state.featured_stocks_data = None
+            st.session_state.featured_stocks_errors = {'系统错误': str(e)}
+            a_progress.progress(100, text="❌ A股数据加载失败")
+
+        a_status.empty()
+        a_progress.empty()
 
     # 显示A股数据
     stocks_df = st.session_state.get('featured_stocks_data')
@@ -563,16 +571,21 @@ with tab7:
     st.subheader("🇺🇸 美股重点股票")
     st.markdown("特斯拉、丰田 - 经营周期分析")
 
-    # 加载美股数据
+    # 加载美股数据（带进度条）
     if refresh_stocks_btn or 'us_stocks_data' not in st.session_state:
-        with st.spinner("正在获取美股经营周期数据..."):
-            try:
-                us_df, us_errors = fetch_all_us_stocks_data()
-                st.session_state.us_stocks_data = us_df
-                st.session_state.us_stocks_errors = us_errors
-            except Exception as e:
-                st.session_state.us_stocks_data = None
-                st.session_state.us_stocks_errors = {'系统错误': str(e)}
+        us_progress = st.progress(0, text="正在并行获取美股经营周期数据...")
+
+        try:
+            us_df, us_errors = fetch_all_us_stocks_data()
+            st.session_state.us_stocks_data = us_df
+            st.session_state.us_stocks_errors = us_errors
+            us_progress.progress(100, text="✅ 美股数据加载完成")
+        except Exception as e:
+            st.session_state.us_stocks_data = None
+            st.session_state.us_stocks_errors = {'系统错误': str(e)}
+            us_progress.progress(100, text="❌ 美股数据加载失败")
+
+        us_progress.empty()
 
     # 显示美股数据
     us_df = st.session_state.get('us_stocks_data')
