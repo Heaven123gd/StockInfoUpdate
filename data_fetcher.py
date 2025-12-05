@@ -1361,6 +1361,76 @@ def fetch_all_featured_stocks_data(progress_callback=None) -> Tuple[pd.DataFrame
     return final_df, errors
 
 
+def load_prepared_stock_data(file_path: str = 'prepared_stock_data.csv') -> Tuple[pd.DataFrame, Dict]:
+    """
+    从本地 CSV 文件加载预先准备好的股票数据（用于快速首次加载）
+
+    Args:
+        file_path: CSV 文件路径
+
+    Returns:
+        Tuple: (DataFrame, 错误信息Dict)
+    """
+    import os
+
+    errors = {}
+
+    try:
+        if not os.path.exists(file_path):
+            return pd.DataFrame(), {'文件错误': f'预加载文件 {file_path} 不存在'}
+
+        df = pd.read_csv(file_path, encoding='utf-8')
+
+        # 验证必要的列
+        required_cols = ['股票名称', '股票代码', '报告期']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            return pd.DataFrame(), {'格式错误': f'缺少必要列: {missing_cols}'}
+
+        # 按股票名称和报告期排序
+        df = df.sort_values(['股票名称', '报告期'], ascending=[True, False])
+
+        return df, errors
+
+    except Exception as e:
+        return pd.DataFrame(), {'读取错误': str(e)}
+
+
+def load_prepared_us_stock_data(file_path: str = 'prepared_us_stock_data.csv') -> Tuple[pd.DataFrame, Dict]:
+    """
+    从本地 CSV 文件加载预先准备好的美股数据（用于快速首次加载）
+
+    Args:
+        file_path: CSV 文件路径
+
+    Returns:
+        Tuple: (DataFrame, 错误信息Dict)
+    """
+    import os
+
+    errors = {}
+
+    try:
+        if not os.path.exists(file_path):
+            # 美股预加载文件不存在时返回空，不报错
+            return pd.DataFrame(), {}
+
+        df = pd.read_csv(file_path, encoding='utf-8')
+
+        # 验证必要的列
+        required_cols = ['股票名称', '股票代码', '报告期', '存货周转天数', '应收账款周转天数', '经营周期']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            return pd.DataFrame(), {'格式错误': f'缺少必要列: {missing_cols}'}
+
+        df = df.sort_values(['股票名称', '报告期'], ascending=[True, False])
+
+        return df, errors
+
+    except Exception as e:
+        return pd.DataFrame(), {'读取错误': str(e)}
+
+
 # =====================
 # 美股数据获取
 # =====================

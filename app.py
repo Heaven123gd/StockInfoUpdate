@@ -25,7 +25,9 @@ from data_fetcher import (
     fetch_all_featured_stocks_data,
     fetch_all_us_stocks_data,
     parse_uploaded_index_file,
-    validate_uploaded_index_file
+    validate_uploaded_index_file,
+    load_prepared_stock_data,
+    load_prepared_us_stock_data
 )
 from charts import (
     display_market_summary,
@@ -521,10 +523,9 @@ with tab6:
 # =====================
 with tab7:
     st.header("🏢 主要股票基本面数据")
-    st.caption("⚡ 数据并行加载，加载速度已优化")
 
     # 刷新按钮
-    refresh_stocks_btn = st.button("🔄 刷新股票数据", key='refresh_stocks')
+    refresh_stocks_btn = st.button("🔄 刷新最新数据 (从API获取)", key='refresh_stocks')
 
     # =====================
     # A股数据
@@ -532,23 +533,50 @@ with tab7:
     st.subheader("🇨🇳 A股重点股票")
     st.markdown("比亚迪、美的集团、海尔智家、格力电器")
 
-    # 加载A股数据（带进度条）
-    if refresh_stocks_btn or 'featured_stocks_data' not in st.session_state:
-        a_progress = st.progress(0, text="正在并行获取A股基本面数据...")
-        a_status = st.empty()
-
+    # 数据加载逻辑：
+    # 1. 首次加载：从预加载文件读取（快速）
+    # 2. 点击刷新：从 API 获取最新数据
+    if refresh_stocks_btn:
+        # 用户点击刷新 -> 从 API 获取最新数据
+        a_progress = st.progress(0, text="正在从API并行获取A股最新数据...")
         try:
             stocks_df, stocks_errors = fetch_all_featured_stocks_data()
             st.session_state.featured_stocks_data = stocks_df
             st.session_state.featured_stocks_errors = stocks_errors
-            a_progress.progress(100, text="✅ A股数据加载完成")
+            st.session_state.featured_stocks_source = 'api'  # 标记数据来源
+            a_progress.progress(100, text="✅ A股最新数据加载完成")
         except Exception as e:
             st.session_state.featured_stocks_data = None
             st.session_state.featured_stocks_errors = {'系统错误': str(e)}
+            st.session_state.featured_stocks_source = 'api_error'
             a_progress.progress(100, text="❌ A股数据加载失败")
-
-        a_status.empty()
         a_progress.empty()
+    elif 'featured_stocks_data' not in st.session_state:
+        # 首次加载 -> 从预加载文件读取
+        stocks_df, stocks_errors = load_prepared_stock_data('prepared_stock_data.csv')
+        if not stocks_df.empty:
+            st.session_state.featured_stocks_data = stocks_df
+            st.session_state.featured_stocks_errors = stocks_errors
+            st.session_state.featured_stocks_source = 'preload'  # 标记数据来源
+        else:
+            # 预加载失败，回退到 API
+            st.warning("预加载文件读取失败，正在从API获取数据...")
+            try:
+                stocks_df, stocks_errors = fetch_all_featured_stocks_data()
+                st.session_state.featured_stocks_data = stocks_df
+                st.session_state.featured_stocks_errors = stocks_errors
+                st.session_state.featured_stocks_source = 'api'
+            except Exception as e:
+                st.session_state.featured_stocks_data = None
+                st.session_state.featured_stocks_errors = {'系统错误': str(e)}
+                st.session_state.featured_stocks_source = 'api_error'
+
+    # 显示数据来源标识
+    data_source = st.session_state.get('featured_stocks_source', 'unknown')
+    if data_source == 'preload':
+        st.caption("📁 当前显示：预加载数据 | 点击上方按钮获取最新数据")
+    elif data_source == 'api':
+        st.caption("🌐 当前显示：API 最新数据")
 
     # 显示A股数据
     stocks_df = st.session_state.get('featured_stocks_data')
@@ -561,7 +589,7 @@ with tab7:
         for name, err in stocks_errors.items():
             st.warning(f"⚠️ {name}: {err}")
     else:
-        st.info("请点击「刷新股票数据」按钮加载数据")
+        st.info("数据加载中...")
 
     st.divider()
 
@@ -571,21 +599,47 @@ with tab7:
     st.subheader("🇺🇸 美股重点股票")
     st.markdown("特斯拉、丰田 - 经营周期分析")
 
-    # 加载美股数据（带进度条）
-    if refresh_stocks_btn or 'us_stocks_data' not in st.session_state:
-        us_progress = st.progress(0, text="正在并行获取美股经营周期数据...")
-
+    # 美股数据加载逻辑（同A股）
+    if refresh_stocks_btn:
+        # 用户点击刷新 -> 从 API 获取最新数据
+        us_progress = st.progress(0, text="正在从API并行获取美股最新数据...")
         try:
             us_df, us_errors = fetch_all_us_stocks_data()
             st.session_state.us_stocks_data = us_df
             st.session_state.us_stocks_errors = us_errors
-            us_progress.progress(100, text="✅ 美股数据加载完成")
+            st.session_state.us_stocks_source = 'api'
+            us_progress.progress(100, text="✅ 美股最新数据加载完成")
         except Exception as e:
             st.session_state.us_stocks_data = None
             st.session_state.us_stocks_errors = {'系统错误': str(e)}
+            st.session_state.us_stocks_source = 'api_error'
             us_progress.progress(100, text="❌ 美股数据加载失败")
-
         us_progress.empty()
+    elif 'us_stocks_data' not in st.session_state:
+        # 首次加载 -> 尝试从预加载文件读取
+        us_df, us_errors = load_prepared_us_stock_data('prepared_us_stock_data.csv')
+        if not us_df.empty:
+            st.session_state.us_stocks_data = us_df
+            st.session_state.us_stocks_errors = us_errors
+            st.session_state.us_stocks_source = 'preload'
+        else:
+            # 预加载文件不存在，从 API 获取
+            try:
+                us_df, us_errors = fetch_all_us_stocks_data()
+                st.session_state.us_stocks_data = us_df
+                st.session_state.us_stocks_errors = us_errors
+                st.session_state.us_stocks_source = 'api'
+            except Exception as e:
+                st.session_state.us_stocks_data = None
+                st.session_state.us_stocks_errors = {'系统错误': str(e)}
+                st.session_state.us_stocks_source = 'api_error'
+
+    # 显示数据来源标识
+    us_data_source = st.session_state.get('us_stocks_source', 'unknown')
+    if us_data_source == 'preload':
+        st.caption("📁 当前显示：预加载数据 | 点击上方按钮获取最新数据")
+    elif us_data_source == 'api':
+        st.caption("🌐 当前显示：API 最新数据")
 
     # 显示美股数据
     us_df = st.session_state.get('us_stocks_data')
@@ -619,4 +673,4 @@ with tab7:
         for name, err in us_errors.items():
             st.warning(f"⚠️ {name}: {err}")
     else:
-        st.info("请点击「刷新股票数据」按钮加载美股数据")
+        st.info("数据加载中...")
