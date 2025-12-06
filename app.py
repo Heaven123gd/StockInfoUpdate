@@ -300,15 +300,52 @@ with tab2:
     if refresh_btn or load_tab2:
         with st.spinner("正在获取业绩数据，请稍候..."):
             try:
-                st.session_state.profit_top100 = fetch_profit_top100(report_date_str)
+                top100_df, profit_stats = fetch_profit_top100(report_date_str)
+                st.session_state.profit_top100 = top100_df
+                st.session_state.profit_stats = profit_stats
                 st.session_state.profit_error = None
             except Exception as e:
                 st.session_state.profit_top100 = None
+                st.session_state.profit_stats = None
                 st.session_state.profit_error = str(e)
 
     if st.session_state.get('profit_error'):
         st.error(f"获取数据失败: {st.session_state.profit_error}")
     elif st.session_state.get('profit_top100') is not None:
+        # 显示统计指标
+        profit_stats = st.session_state.get('profit_stats')
+        if profit_stats:
+            # 转换为万亿元
+            top100_trillion = profit_stats['top100_total'] / 1e12
+            all_trillion = profit_stats['all_total'] / 1e12
+            ratio = profit_stats['ratio']
+
+            # 使用三列布局显示关键指标
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    label="🏆 归母净利润100强总计",
+                    value=f"{top100_trillion:.2f} 万亿元"
+                )
+            with col2:
+                st.metric(
+                    label="📊 全部A股归母净利润总计",
+                    value=f"{all_trillion:.2f} 万亿元"
+                )
+            with col3:
+                st.metric(
+                    label="📈 100强占比",
+                    value=f"{ratio:.2f}%"
+                )
+
+            # 显示附加信息
+            st.caption(
+                f"📋 全A股公司数：{profit_stats['all_count']} 家 | "
+                f"✅ 盈利：{profit_stats['profit_count']} 家 | "
+                f"❌ 亏损：{profit_stats['loss_count']} 家"
+            )
+            st.divider()
+
         display_profit_top100(st.session_state.get('profit_top100'))
     elif 'profit_top100' not in st.session_state:
         st.info("👆 点击上方按钮加载数据")

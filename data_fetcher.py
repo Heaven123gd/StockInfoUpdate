@@ -103,15 +103,22 @@ def fetch_stock_code_name() -> pd.DataFrame:
         raise Exception(f"获取股票代码列表失败: {str(e)}")
 
 
-def fetch_profit_top100(report_date: str) -> pd.DataFrame:
+def fetch_profit_top100(report_date: str) -> Tuple[pd.DataFrame, dict]:
     """
-    获取A股归母净利润前100强
+    获取A股归母净利润前100强及统计信息
 
     Args:
         report_date: 报告期日期，格式 'YYYYMMDD'
 
     Returns:
-        DataFrame: 净利润前100强数据
+        Tuple[DataFrame, dict]: (净利润前100强数据, 统计信息字典)
+        统计信息字典包含:
+        - top100_total: 100强归母净利润总计（元）
+        - all_total: 全A股归母净利润总计（元）
+        - ratio: 100强占比（百分比）
+        - all_count: 全A股公司数量
+        - profit_count: 盈利公司数量
+        - loss_count: 亏损公司数量
     """
     try:
         # 获取股票代码名称
@@ -130,8 +137,30 @@ def fetch_profit_top100(report_date: str) -> pd.DataFrame:
         profit_col = '净利润-净利润'
         if profit_col in merged.columns:
             merged[profit_col] = pd.to_numeric(merged[profit_col], errors='coerce')
+
+            # 计算全A股统计信息
+            all_total = merged[profit_col].sum(skipna=True)
+            all_count = len(merged)
+            profit_count = (merged[profit_col] > 0).sum()
+            loss_count = (merged[profit_col] < 0).sum()
+
+            # 排序取前100
             top100 = merged.sort_values(by=profit_col, ascending=False).head(100)
-            return top100
+            top100_total = top100[profit_col].sum(skipna=True)
+
+            # 计算占比
+            ratio = (top100_total / all_total * 100) if all_total != 0 else 0
+
+            stats = {
+                'top100_total': top100_total,
+                'all_total': all_total,
+                'ratio': ratio,
+                'all_count': all_count,
+                'profit_count': profit_count,
+                'loss_count': loss_count
+            }
+
+            return top100, stats
         else:
             raise Exception(f"未找到净利润列，可用列: {list(merged.columns)}")
     except Exception as e:
