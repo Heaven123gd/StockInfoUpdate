@@ -51,11 +51,11 @@ def display_market_summary(sse_df: pd.DataFrame, szse_df: pd.DataFrame):
             with col2:
                 total_mv = sse_dict.get('总市值', 0)
                 if isinstance(total_mv, (int, float)):
-                    st.metric("总市值", f"{float(total_mv):.2f}亿")
+                    st.metric("总市值(亿)", f"{float(total_mv):.2f}亿")
                 else:
-                    st.metric("总市值", str(total_mv))
+                    st.metric("总市值(亿)", str(total_mv))
             with col3:
-                st.metric("流通市值", f"{sse_dict.get('流通市值', 'N/A')}")
+                st.metric("流通市值(亿)", f"{sse_dict.get('流通市值', 'N/A')}")
             with col4:
                 st.metric("平均市盈率", f"{sse_dict.get('平均市盈率', 'N/A')}")
         except Exception:
