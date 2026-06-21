@@ -766,7 +766,7 @@ def _plot_single_comparison(name: str, data: Dict):
 
     # 绘制归一化后的道琼斯指数（虚线）
     ax.plot(compare_df['date'], compare_df['close_normalized'],
-            color=compare_color, linewidth=1.2, linestyle='--',
+            color=compare_color, linewidth=1.2, linestyle='-',
             label=f"道琼斯工业指数（归一化）")
 
     ax.set_title(f'{name} vs 道琼斯工业指数\n（归一化至 {start_date}）',
@@ -820,7 +820,7 @@ def _display_comparison_combined(comparison_data: Dict):
         if not compare_df.empty:
             color = INDEX_COLORS.get(name, '#333333')
             ax2.plot(compare_df['date'], compare_df['close_normalized'],
-                    label=f"DJI→{name[:4]}", color=color, linewidth=1, linestyle='--')
+                    label=f"DJI→{name[:4]}", color=color, linewidth=1, linestyle='-')
 
     ax2.set_title('道琼斯工业指数（归一化至各中国指数起点）', fontsize=14, fontweight='bold')
     ax2.set_xlabel('日期')
@@ -834,6 +834,7 @@ def _display_comparison_combined(comparison_data: Dict):
     st.pyplot(fig2)
     plt.close(fig2)
 
+    
 
 def _display_comparison_downloads(comparison_data: Dict):
     """提供对比数据下载"""

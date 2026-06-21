@@ -300,13 +300,15 @@ with tab2:
     if refresh_btn or load_tab2:
         with st.spinner("正在获取业绩数据，请稍候..."):
             try:
-                top100_df, profit_stats = fetch_profit_top100(report_date_str)
+                top100_df, profit_stats, merged = fetch_profit_top100(report_date_str)
                 st.session_state.profit_top100 = top100_df
                 st.session_state.profit_stats = profit_stats
+                st.session_state.merged_data = merged
                 st.session_state.profit_error = None
             except Exception as e:
                 st.session_state.profit_top100 = None
                 st.session_state.profit_stats = None
+                st.session_state.merged_data = None
                 st.session_state.profit_error = str(e)
 
     if st.session_state.get('profit_error'):
@@ -362,7 +364,7 @@ with tab3:
             with st.spinner("正在计算利润分布..."):
                 try:
                     result_df, pie_data = calculate_profit_distribution(
-                        st.session_state.profit_top100
+                        st.session_state.merged_data
                     )
                     st.session_state.profit_dist = (result_df, pie_data)
                     st.session_state.dist_error = None

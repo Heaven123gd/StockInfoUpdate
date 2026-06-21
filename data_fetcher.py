@@ -160,7 +160,7 @@ def fetch_profit_top100(report_date: str) -> Tuple[pd.DataFrame, dict]:
                 'loss_count': loss_count
             }
 
-            return top100, stats
+            return top100, stats, merged
         else:
             raise Exception(f"未找到净利润列，可用列: {list(merged.columns)}")
     except Exception as e:
@@ -246,7 +246,10 @@ def fetch_index_daily_akshare(symbol: str, start_date: str = None) -> pd.DataFra
         DataFrame: 包含 date, open, high, low, close, volume 列
     """
     try:
-        df = ak.stock_zh_index_daily(symbol=symbol)
+        if symbol == 'sz399106': #对于深圳综指，用这个新的接口获取数据
+            df = ak.stock_zh_index_daily_tx(symbol=symbol)
+        else:
+            df = ak.stock_zh_index_daily(symbol=symbol)
         # 标准化列名
         df = df.rename(columns={
             'date': 'date',
@@ -947,6 +950,7 @@ def prepare_all_index_comparisons(china_indices: Dict[str, pd.DataFrame],
             errors[name] = str(e)
 
     return comparison_data, errors
+
 
 
 # =====================
