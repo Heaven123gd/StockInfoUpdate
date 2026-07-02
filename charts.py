@@ -6,6 +6,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.dates as mdates
@@ -68,6 +69,13 @@ def display_market_summary(sse_df: pd.DataFrame, szse_df: pd.DataFrame):
     st.subheader("深交所市场统计")
 
     if szse_df is not None and not szse_df.empty:
+        query_date = szse_df.attrs.get('query_date')
+        actual_date = szse_df.attrs.get('actual_date')
+        if query_date and actual_date and query_date != actual_date:
+            st.caption(
+                f"所选日期 {query_date} 暂无可用数据，已自动使用最近可用交易日 {actual_date}。"
+            )
+
         # 提取股票行数据
         try:
             stock_row = szse_df[szse_df['证券类别'] == '股票']
@@ -861,6 +869,73 @@ def _display_comparison_downloads(comparison_data: Dict):
                 mime="text/csv",
                 key=f"download_cmp_{name}"
             )
+
+
+# =====================
+# 创业板市净率展示
+# =====================
+
+def display_gem_pb_monthly_trend(monthly_df: pd.DataFrame, loaded_at: str = None):
+    """展示创业板市净率从起始至最新的月度走势图。"""
+    if monthly_df is None or monthly_df.empty:
+        st.warning("暂无创业板市净率数据")
+        return
+
+    plot_df = monthly_df.copy()
+    plot_df['日期'] = pd.to_datetime(plot_df['日期'])
+    plot_df['市净率'] = pd.to_numeric(plot_df['市净率'], errors='coerce')
+    plot_df = plot_df.dropna(subset=['日期', '市净率']).sort_values('日期')
+
+    if plot_df.empty:
+        st.warning("暂无有效的创业板市净率数据")
+        return
+
+    chart_df = plot_df.copy()
+    chart_df['日期标签'] = chart_df['日期'].dt.strftime('%Y-%m-%d')
+
+    selected_point = alt.selection_point(
+        fields=['日期标签'],
+        nearest=True,
+        on='click',
+        empty=False
+    )
+    tooltip = [
+        alt.Tooltip('日期标签:N', title='日期'),
+        alt.Tooltip('市净率:Q', title='市净率', format='.2f'),
+    ]
+
+    base = alt.Chart(chart_df).encode(
+        x=alt.X('日期:T', title='月份'),
+        y=alt.Y('市净率:Q', title='市净率', scale=alt.Scale(zero=False)),
+    )
+    line = base.mark_line(color='#1f77b4', strokeWidth=2)
+    points = base.mark_circle(color='#1f77b4', size=34).encode(
+        opacity=alt.condition(selected_point, alt.value(1), alt.value(0.3)),
+        tooltip=tooltip
+    ).add_params(selected_point)
+    rule = base.mark_rule(color='#777777').encode(
+        opacity=alt.condition(selected_point, alt.value(0.45), alt.value(0)),
+        tooltip=tooltip
+    )
+
+    chart = (line + points + rule).properties(
+        height=430,
+        title='创业板市净率（月度）'
+    ).interactive(bind_y=False)
+    st.altair_chart(chart, use_container_width=True)
+
+    start_date = plot_df['日期'].min().strftime('%Y-%m')
+    end_date = plot_df['日期'].max().strftime('%Y-%m')
+    latest_pb = plot_df['市净率'].iloc[-1]
+    caption = f"数据范围：{start_date} 至 {end_date} | 最新月末市净率：{latest_pb:.2f}"
+    if loaded_at:
+        caption += f" | 缓存更新时间：{loaded_at}"
+    st.caption(caption)
+
+    table_df = plot_df[['日期', '市净率']].copy()
+    table_df['日期'] = table_df['日期'].dt.strftime('%Y-%m-%d')
+    table_df['市净率'] = table_df['市净率'].round(2)
+    st.dataframe(table_df, use_container_width=True, hide_index=True)
 
 
 # =====================

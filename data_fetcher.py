@@ -7,6 +7,8 @@ import akshare as ak
 import pandas as pd
 import numpy as np
 import time
+import requests
+from io import BytesIO
 from typing import Tuple, Dict
 from config import (
     FINANCE_KEYWORDS, BANK_KEYWORDS,
@@ -55,6 +57,99 @@ def fetch_sse_summary() -> pd.DataFrame:
         raise Exception(f"获取上交所数据失败: {str(e)}")
 
 
+def _format_yyyymmdd(date: str) -> str:
+    """将 YYYYMMDD 转为 YYYY-MM-DD。"""
+    return f"{date[:4]}-{date[4:6]}-{date[6:]}"
+
+
+def _build_szse_date_candidates(date: str, max_lookback_days: int = 10):
+    """生成深交所市场总貌查询候选日期，优先使用交易日历。"""
+    target_date = pd.to_datetime(date)
+
+    try:
+        trade_dates = ak.tool_trade_date_hist_sina()
+        date_col = 'trade_date' if 'trade_date' in trade_dates.columns else trade_dates.columns[0]
+        dates = pd.to_datetime(trade_dates[date_col])
+        candidates = dates[dates <= target_date].sort_values(ascending=False).head(max_lookback_days + 1)
+        for item in candidates:
+            yield item.strftime('%Y%m%d')
+        return
+    except Exception:
+        pass
+
+    for offset in range(max_lookback_days + 1):
+        candidate = target_date - pd.Timedelta(days=offset)
+        if candidate.weekday() < 5:
+            yield candidate.strftime('%Y%m%d')
+
+
+def _parse_szse_summary_excel(content: bytes) -> pd.DataFrame:
+    """解析深交所市场总貌 Excel 内容。"""
+    if not content.startswith(b'PK'):
+        raise ValueError("深交所未返回有效 Excel 文件，通常是该日期尚无数据或不是交易日")
+
+    df = pd.read_excel(BytesIO(content), engine="openpyxl")
+    df = df.dropna(how='all').reset_index(drop=True)
+
+    if df.empty:
+        raise ValueError("深交所返回的数据为空")
+
+    if '证券类别' in df.columns:
+        df = df[['证券类别', '数量', '成交金额', '总市值', '流通市值']].copy()
+    else:
+        if df.shape[1] < 5:
+            raise ValueError(f"深交所返回列数不足，可用列: {list(df.columns)}")
+        df = df.iloc[:, :5].copy()
+        df.columns = ['证券类别', '数量', '成交金额', '总市值', '流通市值']
+
+    df['证券类别'] = df['证券类别'].astype(str).str.strip()
+    df = df[df['证券类别'].notna() & (df['证券类别'] != '') & (df['证券类别'] != 'nan')]
+
+    for col in ['数量', '成交金额', '总市值', '流通市值']:
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.replace(',', '', regex=False)
+            .str.strip()
+            .replace({'-': np.nan, '--': np.nan, 'None': np.nan, 'nan': np.nan})
+        )
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    return df.reset_index(drop=True)
+
+
+def _fetch_szse_summary_by_date(date: str) -> pd.DataFrame:
+    """直接从深交所接口获取指定日期市场总貌，避免 AKShare 对错误响应读 Excel。"""
+    urls = [
+        "https://www.szse.cn/api/report/ShowReport",
+        "http://www.szse.cn/api/report/ShowReport",
+    ]
+    params = {
+        "SHOWTYPE": "xlsx",
+        "CATALOGID": "1803_sczm",
+        "TABKEY": "tab1",
+        "txtQueryDate": _format_yyyymmdd(date),
+        "random": "0.39339437497296137",
+    }
+    headers = {
+        "Referer": "https://www.szse.cn/market/overview/index.html",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+    }
+    errors = []
+    for url in urls:
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=20)
+            response.raise_for_status()
+            return _parse_szse_summary_excel(response.content)
+        except Exception as e:
+            errors.append(str(e))
+
+    raise Exception("；".join(errors))
+
+
 def fetch_szse_summary(date: str) -> pd.DataFrame:
     """
     获取深交所市场统计数据
@@ -65,11 +160,26 @@ def fetch_szse_summary(date: str) -> pd.DataFrame:
     Returns:
         DataFrame: 深交所统计数据
     """
-    try:
-        df = retry_request(lambda: ak.stock_szse_summary(date=date))
-        return df
-    except Exception as e:
-        raise Exception(f"获取深交所数据失败: {str(e)}")
+    errors = []
+    seen_dates = set()
+
+    for candidate_date in _build_szse_date_candidates(date):
+        if candidate_date in seen_dates:
+            continue
+        seen_dates.add(candidate_date)
+
+        try:
+            df = retry_request(lambda d=candidate_date: _fetch_szse_summary_by_date(d))
+            df.attrs['query_date'] = date
+            df.attrs['actual_date'] = candidate_date
+            return df
+        except Exception as e:
+            errors.append(f"{candidate_date}: {str(e)}")
+
+    detail = "；".join(errors[:3])
+    if len(errors) > 3:
+        detail += f"；另有 {len(errors) - 3} 个候选日期失败"
+    raise Exception(f"获取深交所数据失败: {detail}")
 
 
 def fetch_stock_yjbb(date: str) -> pd.DataFrame:
@@ -228,6 +338,68 @@ def calculate_profit_distribution(df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]
 
     except Exception as e:
         raise Exception(f"计算利润分布失败: {str(e)}")
+
+
+# =====================
+# 创业板市净率数据获取与计算函数
+# =====================
+
+def _to_numeric_series(series: pd.Series) -> pd.Series:
+    """将可能包含逗号、空值占位符的序列转为数值。"""
+    if series.dtype == object:
+        text = (
+            series.astype(str)
+            .str.replace(',', '', regex=False)
+            .str.strip()
+            .replace({'-': np.nan, '--': np.nan, 'None': np.nan, 'nan': np.nan})
+        )
+        multipliers = pd.Series(1.0, index=text.index)
+        multipliers = multipliers.mask(text.str.contains('亿', na=False), 1e8)
+        multipliers = multipliers.mask(text.str.contains('万', na=False), 1e4)
+        text = (
+            text.str.replace('亿元', '', regex=False)
+            .str.replace('万元', '', regex=False)
+            .str.replace('亿', '', regex=False)
+            .str.replace('万', '', regex=False)
+        )
+        return pd.to_numeric(text, errors='coerce') * multipliers
+    return pd.to_numeric(series, errors='coerce')
+
+
+def fetch_gem_market_pb_monthly(months: int = None) -> pd.DataFrame:
+    """
+    获取创业板市净率全量历史数据，并按月份取月末样本。
+
+    Returns:
+        DataFrame: 包含 月份、日期、市净率 等列
+    """
+    try:
+        df = retry_request(lambda: ak.stock_market_pb_lg(symbol="创业板"), max_retries=5, delay=3)
+        if df.empty:
+            raise Exception("创业板历史市净率数据为空")
+        if '日期' not in df.columns or '市净率' not in df.columns:
+            raise Exception(f"历史市净率数据缺少必要列，可用列: {list(df.columns)}")
+
+        result = df.copy()
+        result['日期'] = pd.to_datetime(result['日期'])
+
+        numeric_cols = ['指数', '市净率', '等权市净率', '市净率中位数']
+        for col in numeric_cols:
+            if col in result.columns:
+                result[col] = _to_numeric_series(result[col])
+
+        result = result.dropna(subset=['日期', '市净率']).sort_values('日期')
+        result['月份'] = result['日期'].dt.to_period('M').astype(str)
+        monthly = result.groupby('月份', as_index=False).tail(1).reset_index(drop=True)
+
+        if months is not None and months > 0:
+            monthly = monthly.tail(months).reset_index(drop=True)
+
+        display_cols = ['月份', '日期'] + [col for col in numeric_cols if col in monthly.columns]
+        return monthly[display_cols]
+
+    except Exception as e:
+        raise Exception(f"获取创业板月度历史市净率失败: {str(e)}")
 
 
 # =====================

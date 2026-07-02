@@ -27,7 +27,8 @@ from data_fetcher import (
     parse_uploaded_index_file,
     validate_uploaded_index_file,
     load_prepared_stock_data,
-    load_prepared_us_stock_data
+    load_prepared_us_stock_data,
+    fetch_gem_market_pb_monthly
 )
 from charts import (
     display_market_summary,
@@ -36,7 +37,8 @@ from charts import (
     display_index_charts,
     display_index_distribution,
     display_index_comparison,
-    display_featured_stocks
+    display_featured_stocks,
+    display_gem_pb_monthly_trend
 )
 
 # =====================
@@ -238,8 +240,9 @@ st.title(f"{APP_ICON} {APP_TITLE}")
 st.markdown(f"**市场日期:** {market_date_str} | **报告期:** {selected_report}")
 
 # 使用 tabs 组织内容
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab_pb, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 市场统计",
+    "📐 创业板市净率",
     "🏆 归母净利润100强",
     "🍰 利润分布",
     "📈 指数走势",
@@ -286,6 +289,45 @@ with tab1:
             st.session_state.get('szse_data')
         )
     elif 'sse_data' not in st.session_state:
+        st.info("👆 点击上方按钮加载数据")
+
+# =====================
+# Tab PB: 创业板市净率
+# =====================
+with tab_pb:
+    st.header("创业板市净率")
+
+    gem_pb_cache_version = "full_history_monthly_v1"
+    has_gem_pb_cache = (
+        st.session_state.get('gem_pb_cache_version') == gem_pb_cache_version and
+        st.session_state.get('gem_pb_monthly') is not None
+    )
+
+    load_tab_pb = st.button(
+        "📥 加载创业板市净率数据",
+        key='load_tab_pb'
+    ) if not has_gem_pb_cache else False
+
+    if refresh_btn or load_tab_pb:
+        with st.spinner("正在获取创业板市净率历史数据..."):
+            try:
+                st.session_state.gem_pb_monthly = fetch_gem_market_pb_monthly()
+                st.session_state.gem_pb_error = None
+                st.session_state.gem_pb_loaded_at = datetime.now().strftime('%Y-%m-%d %H:%M')
+                st.session_state.gem_pb_cache_version = gem_pb_cache_version
+                has_gem_pb_cache = True
+            except Exception as e:
+                st.session_state.gem_pb_error = str(e)
+
+    if st.session_state.get('gem_pb_error'):
+        st.warning(f"创业板市净率数据获取失败: {st.session_state.gem_pb_error}")
+
+    if has_gem_pb_cache:
+        display_gem_pb_monthly_trend(
+            st.session_state.get('gem_pb_monthly'),
+            st.session_state.get('gem_pb_loaded_at')
+        )
+    else:
         st.info("👆 点击上方按钮加载数据")
 
 # =====================
