@@ -3,7 +3,6 @@
 封装所有 akshare 数据获取逻辑，每个函数接收日期参数
 """
 
-import akshare as ak
 import pandas as pd
 import numpy as np
 import time
@@ -18,6 +17,25 @@ from config import (
     DJI_SYMBOL, DJI_NAME, COMPARISON_START_DATE,
     FEATURED_STOCKS, STOCK_EXCHANGE_SUFFIX
 )
+
+
+class _UnavailableAkShare:
+    """延迟暴露 AKShare 导入错误，避免应用启动阶段直接崩溃。"""
+
+    def __init__(self, error):
+        self.error = error
+
+    def __getattr__(self, name):
+        raise ImportError(
+            "AKShare 导入失败，请确认部署环境已成功安装 requirements.txt 中的 "
+            f"akshare 依赖。原始错误: {self.error}"
+        )
+
+
+try:
+    import akshare as ak
+except Exception as exc:
+    ak = _UnavailableAkShare(exc)
 
 
 def retry_request(func, max_retries=3, delay=2):
