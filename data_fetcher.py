@@ -341,8 +341,16 @@ def calculate_profit_distribution(df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]
 
 
 # =====================
-# 创业板市净率数据获取与计算函数
+# 市净率数据获取与计算函数
 # =====================
+
+PB_MARKET_SYMBOLS = ['上证', '深证', '创业板', '科创版']
+PB_MARKET_DISPLAY_NAMES = {
+    '上证': '上证',
+    '深证': '深证',
+    '创业板': '创业板',
+    '科创版': '科创板',
+}
 
 def _to_numeric_series(series: pd.Series) -> pd.Series:
     """将可能包含逗号、空值占位符的序列转为数值。"""
@@ -366,17 +374,17 @@ def _to_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors='coerce')
 
 
-def fetch_gem_market_pb_monthly(months: int = None) -> pd.DataFrame:
+def _fetch_single_market_pb_monthly(symbol: str, months: int = None) -> pd.DataFrame:
     """
-    获取创业板市净率全量历史数据，并按月份取月末样本。
+    获取单个板块市净率全量历史数据，并按月份取月末样本。
 
     Returns:
-        DataFrame: 包含 月份、日期、市净率 等列
+        DataFrame: 包含 板块、月份、日期、市净率 等列
     """
     try:
-        df = retry_request(lambda: ak.stock_market_pb_lg(symbol="创业板"), max_retries=5, delay=3)
+        df = retry_request(lambda: ak.stock_market_pb_lg(symbol=symbol), max_retries=5, delay=3)
         if df.empty:
-            raise Exception("创业板历史市净率数据为空")
+            raise Exception(f"{symbol} 历史市净率数据为空")
         if '日期' not in df.columns or '市净率' not in df.columns:
             raise Exception(f"历史市净率数据缺少必要列，可用列: {list(df.columns)}")
 
@@ -396,10 +404,41 @@ def fetch_gem_market_pb_monthly(months: int = None) -> pd.DataFrame:
             monthly = monthly.tail(months).reset_index(drop=True)
 
         display_cols = ['月份', '日期'] + [col for col in numeric_cols if col in monthly.columns]
-        return monthly[display_cols]
+        monthly = monthly[display_cols].copy()
+        monthly.insert(0, '板块', PB_MARKET_DISPLAY_NAMES.get(symbol, symbol))
+        monthly['数据源标识'] = symbol
+        return monthly
 
     except Exception as e:
-        raise Exception(f"获取创业板月度历史市净率失败: {str(e)}")
+        raise Exception(f"获取 {symbol} 月度历史市净率失败: {str(e)}")
+
+
+def fetch_market_pb_monthly(symbols=None, months: int = None) -> pd.DataFrame:
+    """
+    获取多个板块市净率全量历史数据，并按月份取月末样本。
+
+    默认板块: 上证、深证、创业板、科创板。
+    """
+    if symbols is None:
+        symbols = PB_MARKET_SYMBOLS
+
+    all_data = []
+    errors = {}
+
+    for symbol in symbols:
+        try:
+            all_data.append(_fetch_single_market_pb_monthly(symbol, months=months))
+        except Exception as e:
+            errors[symbol] = str(e)
+
+    if not all_data:
+        detail = "；".join(errors.values())
+        raise Exception(f"获取市净率数据失败: {detail}")
+
+    result = pd.concat(all_data, ignore_index=True)
+    result = result.sort_values(['板块', '日期']).reset_index(drop=True)
+    result.attrs['errors'] = errors
+    return result
 
 
 # =====================

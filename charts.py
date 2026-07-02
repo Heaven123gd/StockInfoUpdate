@@ -872,44 +872,103 @@ def _display_comparison_downloads(comparison_data: Dict):
 
 
 # =====================
-# 创业板市净率展示
+# 市净率展示
 # =====================
 
-def display_gem_pb_monthly_trend(monthly_df: pd.DataFrame, loaded_at: str = None):
-    """展示创业板市净率从起始至最新的月度走势图。"""
+def display_market_pb_monthly_trend(monthly_df: pd.DataFrame, loaded_at: str = None):
+    """按板块分别展示市净率走势图，并在最后展示叠加对比图。"""
     if monthly_df is None or monthly_df.empty:
-        st.warning("暂无创业板市净率数据")
+        st.warning("暂无市净率数据")
         return
 
     plot_df = monthly_df.copy()
     plot_df['日期'] = pd.to_datetime(plot_df['日期'])
     plot_df['市净率'] = pd.to_numeric(plot_df['市净率'], errors='coerce')
+    if '板块' not in plot_df.columns:
+        plot_df['板块'] = '市净率'
     plot_df = plot_df.dropna(subset=['日期', '市净率']).sort_values('日期')
 
     if plot_df.empty:
-        st.warning("暂无有效的创业板市净率数据")
+        st.warning("暂无有效的市净率数据")
         return
 
+    start_date = plot_df['日期'].min().strftime('%Y-%m')
+    end_date = plot_df['日期'].max().strftime('%Y-%m')
+    caption = f"数据范围：{start_date} 至 {end_date}"
+    if loaded_at:
+        caption += f" | 缓存更新时间：{loaded_at}"
+    st.caption(caption)
+
+    preferred_markets = ['上证', '深证', '创业板', '科创板']
+    ordered_markets = [market for market in preferred_markets if market in plot_df['板块'].unique()]
+    remaining_markets = [market for market in plot_df['板块'].unique() if market not in ordered_markets]
+    ordered_markets.extend(remaining_markets)
+
+    for market in ordered_markets:
+        market_df = plot_df[plot_df['板块'] == market].copy()
+        if market_df.empty:
+            continue
+
+        st.markdown(f"### {market}")
+        st.altair_chart(
+            _build_market_pb_chart(
+                market_df,
+                title=f"{market}市净率（月度）",
+                show_legend=False
+            ),
+            use_container_width=True
+        )
+
+        table_df = market_df[['日期', '市净率']].copy()
+        table_df['日期'] = table_df['日期'].dt.strftime('%Y-%m-%d')
+        table_df['市净率'] = table_df['市净率'].round(2)
+        st.dataframe(table_df, use_container_width=True, hide_index=True)
+        st.divider()
+
+    st.markdown("### 叠加对比")
+    st.altair_chart(
+        _build_market_pb_chart(
+            plot_df,
+            title='市净率叠加对比（月度）',
+            show_legend=True
+        ),
+        use_container_width=True
+    )
+
+
+def _build_market_pb_chart(plot_df: pd.DataFrame, title: str, show_legend: bool = True):
+    """构建市净率交互图。"""
     chart_df = plot_df.copy()
     chart_df['日期标签'] = chart_df['日期'].dt.strftime('%Y-%m-%d')
 
     selected_point = alt.selection_point(
-        fields=['日期标签'],
+        fields=['日期标签', '板块'],
         nearest=True,
         on='click',
         empty=False
     )
+
     tooltip = [
+        alt.Tooltip('板块:N', title='板块'),
         alt.Tooltip('日期标签:N', title='日期'),
         alt.Tooltip('市净率:Q', title='市净率', format='.2f'),
     ]
 
+    legend = alt.Legend(title='板块') if show_legend else None
     base = alt.Chart(chart_df).encode(
         x=alt.X('日期:T', title='月份'),
         y=alt.Y('市净率:Q', title='市净率', scale=alt.Scale(zero=False)),
+        color=alt.Color(
+            '板块:N',
+            legend=legend,
+            scale=alt.Scale(
+                domain=['上证', '深证', '创业板', '科创板'],
+                range=['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd']
+            )
+        ),
     )
-    line = base.mark_line(color='#1f77b4', strokeWidth=2)
-    points = base.mark_circle(color='#1f77b4', size=34).encode(
+    line = base.mark_line(strokeWidth=2)
+    points = base.mark_circle(size=34).encode(
         opacity=alt.condition(selected_point, alt.value(1), alt.value(0.3)),
         tooltip=tooltip
     ).add_params(selected_point)
@@ -918,24 +977,10 @@ def display_gem_pb_monthly_trend(monthly_df: pd.DataFrame, loaded_at: str = None
         tooltip=tooltip
     )
 
-    chart = (line + points + rule).properties(
+    return (line + points + rule).properties(
         height=430,
-        title='创业板市净率（月度）'
+        title=title
     ).interactive(bind_y=False)
-    st.altair_chart(chart, use_container_width=True)
-
-    start_date = plot_df['日期'].min().strftime('%Y-%m')
-    end_date = plot_df['日期'].max().strftime('%Y-%m')
-    latest_pb = plot_df['市净率'].iloc[-1]
-    caption = f"数据范围：{start_date} 至 {end_date} | 最新月末市净率：{latest_pb:.2f}"
-    if loaded_at:
-        caption += f" | 缓存更新时间：{loaded_at}"
-    st.caption(caption)
-
-    table_df = plot_df[['日期', '市净率']].copy()
-    table_df['日期'] = table_df['日期'].dt.strftime('%Y-%m-%d')
-    table_df['市净率'] = table_df['市净率'].round(2)
-    st.dataframe(table_df, use_container_width=True, hide_index=True)
 
 
 # =====================
