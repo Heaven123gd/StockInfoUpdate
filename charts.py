@@ -940,6 +940,10 @@ def _build_market_pb_chart(plot_df: pd.DataFrame, title: str, show_legend: bool 
     """构建市净率交互图。"""
     chart_df = plot_df.copy()
     chart_df['日期标签'] = chart_df['日期'].dt.strftime('%Y-%m-%d')
+    chart_df['年份坐标'] = (
+        chart_df['日期'].dt.year +
+        (chart_df['日期'].dt.dayofyear - 1) / 365.25
+    )
 
     selected_point = alt.selection_point(
         fields=['日期标签', '板块'],
@@ -956,7 +960,12 @@ def _build_market_pb_chart(plot_df: pd.DataFrame, title: str, show_legend: bool 
 
     legend = alt.Legend(title='板块') if show_legend else None
     base = alt.Chart(chart_df).encode(
-        x=alt.X('日期:T', title='月份'),
+        x=alt.X(
+            '年份坐标:Q',
+            title='年份',
+            axis=alt.Axis(format='d', tickMinStep=1),
+            scale=alt.Scale(zero=False)
+        ),
         y=alt.Y('市净率:Q', title='市净率', scale=alt.Scale(zero=False)),
         color=alt.Color(
             '板块:N',
