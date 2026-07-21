@@ -372,7 +372,9 @@ PB_MARKET_DISPLAY_NAMES = {
 
 def _to_numeric_series(series: pd.Series) -> pd.Series:
     """将可能包含逗号、空值占位符的序列转为数值。"""
-    if series.dtype == object:
+    # pandas 3 会将 Excel 文本列推断为 StringDtype，而不再是 object。
+    # 按是否为数值类型判断，确保两种字符串 dtype 都能清理千位分隔符。
+    if not pd.api.types.is_numeric_dtype(series.dtype):
         text = (
             series.astype(str)
             .str.replace(',', '', regex=False)
@@ -548,10 +550,8 @@ def parse_uploaded_index_file(uploaded_file, start_date: str = None) -> pd.DataF
         if 'date' not in df.columns or 'close' not in df.columns:
             raise Exception("文件缺少必要列：需要包含'交易日期'和'收盘价'列")
 
-        # 处理收盘价：可能是带逗号的字符串
-        if df['close'].dtype == object:
-            df['close'] = df['close'].astype(str).str.replace(',', '')
-        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        # 处理收盘价：兼容 object 和 pandas StringDtype 字符串列
+        df['close'] = _to_numeric_series(df['close'])
 
         # 确保日期格式
         df['date'] = pd.to_datetime(df['date'])
@@ -631,6 +631,7 @@ def fetch_index_daily_local(symbol: str, start_date: str = None,
         })
         # 确保日期格式
         df['date'] = pd.to_datetime(df['date'])
+        df['close'] = _to_numeric_series(df['close'])
         # 按日期筛选
         if start_date:
             start_dt = pd.to_datetime(start_date)
@@ -1042,12 +1043,9 @@ def fetch_dji_index(start_date: str = None, data_dir: str = '.') -> pd.DataFrame
             if close_col is None:
                 close_col = df.columns[4] if len(df.columns) > 4 else df.columns[1]
 
-        # 处理收盘价：可能是带逗号的字符串（如 "47,416.91"）
-        close_values = df[close_col]
-        if close_values.dtype == object:
-            # 如果是字符串类型，去掉逗号再转换
-            close_values = close_values.astype(str).str.replace(',', '')
-        close_numeric = pd.to_numeric(close_values, errors='coerce')
+        # 处理收盘价：兼容 object 和 pandas StringDtype 字符串列
+        # （例如 "47,416.91"）。
+        close_numeric = _to_numeric_series(df[close_col])
 
         result = pd.DataFrame({
             'date': pd.to_datetime(df[date_col]),
