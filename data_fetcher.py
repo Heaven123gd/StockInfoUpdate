@@ -7,6 +7,9 @@ import pandas as pd
 import numpy as np
 import time
 import requests
+import re
+from datetime import datetime
+from hashlib import md5
 from io import BytesIO
 from typing import Tuple, Dict
 from config import (
@@ -369,6 +372,27 @@ PB_MARKET_DISPLAY_NAMES = {
     '创业板': '创业板',
     '科创版': '科创板',
 }
+PB_MARKET_INDEX_CODES = {
+    '上证': '1',
+    '深证': '2',
+    '创业板': '4',
+    '科创版': '7',
+}
+PB_MARKET_PAGE_URLS = {
+    '上证': 'https://legulegu.com/stockdata/shanghaiPB',
+    '深证': 'https://legulegu.com/stockdata/shenzhenPB',
+    '创业板': 'https://legulegu.com/stockdata/cybPB',
+    '科创版': 'https://legulegu.com/stockdata/ke-chuang-ban-pb',
+}
+LEGULEGU_MARKET_PB_API_URL = 'https://legulegu.com/api/stockdata/index-basic-pb'
+LEGULEGU_REQUEST_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+    ),
+    'Accept': 'application/json, text/plain, */*',
+}
+
 
 def _to_numeric_series(series: pd.Series) -> pd.Series:
     """将可能包含逗号、空值占位符的序列转为数值。"""
@@ -392,6 +416,59 @@ def _to_numeric_series(series: pd.Series) -> pd.Series:
         )
         return pd.to_numeric(text, errors='coerce') * multipliers
     return pd.to_numeric(series, errors='coerce')
+
+
+def _request_legulegu_market_pb(symbol: str, frequency: str) -> pd.DataFrame:
+    """调用乐咕乐股板块市净率接口，frequency 支持 week 或 month。"""
+    if symbol not in PB_MARKET_INDEX_CODES:
+        raise ValueError(f"不支持的市净率板块: {symbol}")
+    if frequency not in {'week', 'month'}:
+        raise ValueError(f"不支持的市净率频率: {frequency}")
+
+    page_url = PB_MARKET_PAGE_URLS[symbol]
+    session = requests.Session()
+    session.headers.update(LEGULEGU_REQUEST_HEADERS)
+
+    page_response = session.get(page_url, timeout=30)
+    page_response.raise_for_status()
+    csrf_meta = re.search(
+        r'<meta[^>]*name=["\']_csrf["\'][^>]*>',
+        page_response.text,
+        flags=re.IGNORECASE,
+    )
+    csrf_token = None
+    if csrf_meta:
+        content_match = re.search(
+            r'content=["\']([^"\']+)["\']',
+            csrf_meta.group(0),
+            flags=re.IGNORECASE,
+        )
+        if content_match:
+            csrf_token = content_match.group(1)
+    if not csrf_token:
+        raise ValueError("乐咕乐股页面缺少 CSRF token")
+
+    token = md5(datetime.now().date().isoformat().encode('utf-8')).hexdigest()
+    api_response = session.get(
+        LEGULEGU_MARKET_PB_API_URL,
+        params={
+            'token': token,
+            'indexCode': PB_MARKET_INDEX_CODES[symbol],
+            'freq': frequency,
+        },
+        headers={
+            **LEGULEGU_REQUEST_HEADERS,
+            'Referer': page_url,
+            'X-CSRF-Token': csrf_token,
+        },
+        timeout=60,
+    )
+    api_response.raise_for_status()
+    payload = api_response.json()
+    data = payload.get('data')
+    if not isinstance(data, list) or not data:
+        raise ValueError(f"乐咕乐股未返回 {symbol} {frequency} 市净率数据")
+    return pd.DataFrame(data)
 
 
 def _fetch_single_market_pb_monthly(symbol: str, months: int = None) -> pd.DataFrame:
@@ -454,6 +531,83 @@ def fetch_market_pb_monthly(symbols=None, months: int = None) -> pd.DataFrame:
     if not all_data:
         detail = "；".join(errors.values())
         raise Exception(f"获取市净率数据失败: {detail}")
+
+    result = pd.concat(all_data, ignore_index=True)
+    result = result.sort_values(['板块', '日期']).reset_index(drop=True)
+    result.attrs['errors'] = errors
+    return result
+
+
+def _fetch_single_market_pb_weekly(symbol: str, weeks: int = None) -> pd.DataFrame:
+    """
+    获取单个板块的周度市净率，由乐咕乐股 freq=week 接口直接返回。
+
+    Returns:
+        DataFrame: 包含 板块、周、日期、市净率 等列
+    """
+    try:
+        df = retry_request(
+            lambda: _request_legulegu_market_pb(symbol, frequency='week'),
+            max_retries=5,
+            delay=3,
+        )
+        required_cols = ['date', 'close', 'addPb', 'pb', 'middlePb']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise Exception(f"周度市净率数据缺少必要列: {missing_cols}")
+
+        result = df[required_cols].copy()
+        result.columns = ['日期', '指数', '市净率', '等权市净率', '市净率中位数']
+        result['日期'] = (
+            pd.to_datetime(result['日期'], utc=True, errors='coerce')
+            .dt.tz_convert('Asia/Shanghai')
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
+
+        numeric_cols = ['指数', '市净率', '等权市净率', '市净率中位数']
+        for col in numeric_cols:
+            result[col] = _to_numeric_series(result[col])
+
+        result = result.dropna(subset=['日期', '市净率']).sort_values('日期')
+        if result.empty:
+            raise Exception(f"{symbol} 周度市净率有效数据为空")
+
+        if weeks is not None and weeks > 0:
+            result = result.tail(weeks).reset_index(drop=True)
+        else:
+            result = result.reset_index(drop=True)
+
+        result.insert(0, '周', result['日期'].dt.strftime('%G-W%V'))
+        result.insert(0, '板块', PB_MARKET_DISPLAY_NAMES.get(symbol, symbol))
+        result['数据源标识'] = symbol
+        return result
+
+    except Exception as e:
+        raise Exception(f"获取 {symbol} 周度历史市净率失败: {str(e)}")
+
+
+def fetch_market_pb_weekly(symbols=None, weeks: int = None) -> pd.DataFrame:
+    """
+    获取多个板块的周度市净率。
+
+    默认板块: 上证、深证、创业板、科创板。
+    """
+    if symbols is None:
+        symbols = PB_MARKET_SYMBOLS
+
+    all_data = []
+    errors = {}
+
+    for symbol in symbols:
+        try:
+            all_data.append(_fetch_single_market_pb_weekly(symbol, weeks=weeks))
+        except Exception as e:
+            errors[symbol] = str(e)
+
+    if not all_data:
+        detail = "；".join(errors.values())
+        raise Exception(f"获取周度市净率数据失败: {detail}")
 
     result = pd.concat(all_data, ignore_index=True)
     result = result.sort_values(['板块', '日期']).reset_index(drop=True)

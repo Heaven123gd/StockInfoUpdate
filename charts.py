@@ -875,65 +875,128 @@ def _display_comparison_downloads(comparison_data: Dict):
 # 市净率展示
 # =====================
 
-def display_market_pb_monthly_trend(monthly_df: pd.DataFrame, loaded_at: str = None):
-    """按板块分别展示市净率走势图，并在最后展示叠加对比图。"""
-    if monthly_df is None or monthly_df.empty:
-        st.warning("暂无市净率数据")
-        return
+def _prepare_market_pb_plot_data(pb_df: pd.DataFrame) -> pd.DataFrame:
+    """清理市净率绘图数据。"""
+    if pb_df is None or pb_df.empty:
+        return pd.DataFrame(columns=['板块', '日期', '市净率'])
 
-    plot_df = monthly_df.copy()
+    plot_df = pb_df.copy()
     plot_df['日期'] = pd.to_datetime(plot_df['日期'])
     plot_df['市净率'] = pd.to_numeric(plot_df['市净率'], errors='coerce')
     if '板块' not in plot_df.columns:
         plot_df['板块'] = '市净率'
-    plot_df = plot_df.dropna(subset=['日期', '市净率']).sort_values('日期')
+    return plot_df.dropna(subset=['日期', '市净率']).sort_values('日期')
 
-    if plot_df.empty:
-        st.warning("暂无有效的市净率数据")
+
+def _get_market_pb_order(*plot_dfs: pd.DataFrame) -> list:
+    """按固定板块顺序合并多个市净率数据集中的板块名称。"""
+    available_markets = []
+    for plot_df in plot_dfs:
+        if plot_df is not None and not plot_df.empty:
+            available_markets.extend(plot_df['板块'].dropna().unique().tolist())
+
+    available_markets = list(dict.fromkeys(available_markets))
+    preferred_markets = ['上证', '深证', '创业板', '科创板']
+    ordered_markets = [market for market in preferred_markets if market in available_markets]
+    ordered_markets.extend(
+        market for market in available_markets if market not in ordered_markets
+    )
+    return ordered_markets
+
+
+def display_market_pb_trends(
+    monthly_df: pd.DataFrame,
+    weekly_df: pd.DataFrame,
+    loaded_at: str = None,
+):
+    """按板块展示月度、周度市净率走势，并在底部展示两种频率的叠加图。"""
+    monthly_plot_df = _prepare_market_pb_plot_data(monthly_df)
+    weekly_plot_df = _prepare_market_pb_plot_data(weekly_df)
+
+    if monthly_plot_df.empty and weekly_plot_df.empty:
+        st.warning("暂无有效的月度或周度市净率数据")
         return
 
-    start_date = plot_df['日期'].min().strftime('%Y-%m')
-    end_date = plot_df['日期'].max().strftime('%Y-%m')
-    caption = f"数据范围：{start_date} 至 {end_date}"
+    ranges = []
+    if not monthly_plot_df.empty:
+        ranges.append(
+            "月度："
+            f"{monthly_plot_df['日期'].min().strftime('%Y-%m')} 至 "
+            f"{monthly_plot_df['日期'].max().strftime('%Y-%m')}"
+        )
+    if not weekly_plot_df.empty:
+        ranges.append(
+            "周度："
+            f"{weekly_plot_df['日期'].min().strftime('%Y-%m-%d')} 至 "
+            f"{weekly_plot_df['日期'].max().strftime('%Y-%m-%d')}"
+        )
+    caption = "数据范围：" + " | ".join(ranges)
     if loaded_at:
         caption += f" | 缓存更新时间：{loaded_at}"
     st.caption(caption)
 
-    preferred_markets = ['上证', '深证', '创业板', '科创板']
-    ordered_markets = [market for market in preferred_markets if market in plot_df['板块'].unique()]
-    remaining_markets = [market for market in plot_df['板块'].unique() if market not in ordered_markets]
-    ordered_markets.extend(remaining_markets)
+    ordered_markets = _get_market_pb_order(monthly_plot_df, weekly_plot_df)
 
     for market in ordered_markets:
-        market_df = plot_df[plot_df['板块'] == market].copy()
-        if market_df.empty:
-            continue
+        market_monthly_df = monthly_plot_df[monthly_plot_df['板块'] == market].copy()
+        market_weekly_df = weekly_plot_df[weekly_plot_df['板块'] == market].copy()
 
         st.markdown(f"### {market}")
-        st.altair_chart(
-            _build_market_pb_chart(
-                market_df,
-                title=f"{market}市净率（月度）",
-                show_legend=False
-            ),
-            use_container_width=True
-        )
+        if not market_monthly_df.empty:
+            st.altair_chart(
+                _build_market_pb_chart(
+                    market_monthly_df,
+                    title=f"{market}市净率（月度）",
+                    show_legend=False,
+                ),
+                use_container_width=True,
+            )
+            table_df = market_monthly_df[['日期', '市净率']].copy()
+            table_df['日期'] = table_df['日期'].dt.strftime('%Y-%m-%d')
+            table_df['市净率'] = table_df['市净率'].round(2)
+            st.dataframe(table_df, use_container_width=True, hide_index=True)
+        else:
+            st.warning(f"暂无{market}月度市净率数据")
 
-        table_df = market_df[['日期', '市净率']].copy()
-        table_df['日期'] = table_df['日期'].dt.strftime('%Y-%m-%d')
-        table_df['市净率'] = table_df['市净率'].round(2)
-        st.dataframe(table_df, use_container_width=True, hide_index=True)
+        if not market_weekly_df.empty:
+            st.altair_chart(
+                _build_market_pb_chart(
+                    market_weekly_df,
+                    title=f"{market}市净率（周度）",
+                    show_legend=False,
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.warning(f"暂无{market}周度市净率数据")
         st.divider()
 
-    st.markdown("### 叠加对比")
-    st.altair_chart(
-        _build_market_pb_chart(
-            plot_df,
-            title='市净率叠加对比（月度）',
-            show_legend=True
-        ),
-        use_container_width=True
-    )
+    if not monthly_plot_df.empty:
+        st.markdown("### 月度叠加对比")
+        st.altair_chart(
+            _build_market_pb_chart(
+                monthly_plot_df,
+                title='市净率叠加对比（月度）',
+                show_legend=True,
+            ),
+            use_container_width=True,
+        )
+
+    if not weekly_plot_df.empty:
+        st.markdown("### 周度叠加对比")
+        st.altair_chart(
+            _build_market_pb_chart(
+                weekly_plot_df,
+                title='市净率叠加对比（周度）',
+                show_legend=True,
+            ),
+            use_container_width=True,
+        )
+
+
+def display_market_pb_monthly_trend(monthly_df: pd.DataFrame, loaded_at: str = None):
+    """兼容原有仅展示月度市净率的调用。"""
+    display_market_pb_trends(monthly_df, None, loaded_at)
 
 
 def _build_market_pb_chart(plot_df: pd.DataFrame, title: str, show_legend: bool = True):

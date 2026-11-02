@@ -28,7 +28,8 @@ from data_fetcher import (
     validate_uploaded_index_file,
     load_prepared_stock_data,
     load_prepared_us_stock_data,
-    fetch_market_pb_monthly
+    fetch_market_pb_monthly,
+    fetch_market_pb_weekly,
 )
 from charts import (
     display_market_summary,
@@ -38,7 +39,7 @@ from charts import (
     display_index_distribution,
     display_index_comparison,
     display_featured_stocks,
-    display_market_pb_monthly_trend
+    display_market_pb_trends,
 )
 
 # =====================
@@ -297,10 +298,11 @@ with tab1:
 with tab_pb:
     st.header("市净率")
 
-    market_pb_cache_version = "multi_market_monthly_v1"
+    market_pb_cache_version = "multi_market_monthly_weekly_v2"
     has_market_pb_cache = (
         st.session_state.get('market_pb_cache_version') == market_pb_cache_version and
-        st.session_state.get('market_pb_monthly') is not None
+        st.session_state.get('market_pb_monthly') is not None and
+        st.session_state.get('market_pb_weekly') is not None
     )
 
     load_tab_pb = st.button(
@@ -309,9 +311,18 @@ with tab_pb:
     ) if not has_market_pb_cache else False
 
     if refresh_btn or load_tab_pb:
-        with st.spinner("正在获取市净率历史数据..."):
+        with st.spinner("正在获取月度和周度市净率历史数据..."):
             try:
-                st.session_state.market_pb_monthly = fetch_market_pb_monthly()
+                monthly_pb = fetch_market_pb_monthly()
+                weekly_pb = fetch_market_pb_weekly()
+                warnings = {}
+                for frequency, pb_df in [('月度', monthly_pb), ('周度', weekly_pb)]:
+                    for market, message in pb_df.attrs.get('errors', {}).items():
+                        warnings[f'{market}{frequency}'] = message
+
+                st.session_state.market_pb_monthly = monthly_pb
+                st.session_state.market_pb_weekly = weekly_pb
+                st.session_state.market_pb_warnings = warnings
                 st.session_state.market_pb_error = None
                 st.session_state.market_pb_loaded_at = datetime.now().strftime('%Y-%m-%d %H:%M')
                 st.session_state.market_pb_cache_version = market_pb_cache_version
@@ -322,10 +333,16 @@ with tab_pb:
     if st.session_state.get('market_pb_error'):
         st.warning(f"市净率数据获取失败: {st.session_state.market_pb_error}")
 
+    if st.session_state.get('market_pb_warnings'):
+        with st.expander("⚠️ 部分市净率数据获取失败", expanded=False):
+            for market, message in st.session_state.market_pb_warnings.items():
+                st.warning(f"{market}: {message}")
+
     if has_market_pb_cache:
-        display_market_pb_monthly_trend(
+        display_market_pb_trends(
             st.session_state.get('market_pb_monthly'),
-            st.session_state.get('market_pb_loaded_at')
+            st.session_state.get('market_pb_weekly'),
+            st.session_state.get('market_pb_loaded_at'),
         )
     else:
         st.info("👆 点击上方按钮加载数据")
