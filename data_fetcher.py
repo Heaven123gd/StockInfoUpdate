@@ -72,7 +72,7 @@ def fetch_sse_summary() -> pd.DataFrame:
         DataFrame: 上交所统计数据（流通股本、总市值、上市公司数等）
     """
     try:
-        df = retry_request(lambda: ak.stock_sse_summary())
+        df = retry_request(lambda: ak.stock_summary_sse())
         return df
     except Exception as e:
         raise Exception(f"获取上交所数据失败: {str(e)}")
@@ -88,7 +88,7 @@ def _build_szse_date_candidates(date: str, max_lookback_days: int = 10):
     target_date = pd.to_datetime(date)
 
     try:
-        trade_dates = ak.tool_trade_date_hist_sina()
+        trade_dates = ak.calendar_trade_date_hist_sina()
         date_col = 'trade_date' if 'trade_date' in trade_dates.columns else trade_dates.columns[0]
         dates = pd.to_datetime(trade_dates[date_col])
         candidates = dates[dates <= target_date].sort_values(ascending=False).head(max_lookback_days + 1)
@@ -631,19 +631,23 @@ def fetch_index_daily_akshare(symbol: str, start_date: str = None) -> pd.DataFra
         DataFrame: 包含 date, open, high, low, close, volume 列
     """
     try:
-        if symbol == 'sz399106': #对于深圳综指，用这个新的接口获取数据
-            df = ak.stock_zh_index_daily_tx(symbol=symbol)
+        if symbol == 'sz399106':  # 深圳综指使用腾讯指数接口
+            end_date = datetime.now().strftime('%Y%m%d')
+            df = retry_request(
+                lambda: ak.index_zh_daily_tx(
+                    symbol=symbol,
+                    start_date=start_date or '',
+                    end_date=end_date,
+                )
+            )
         else:
-            df = ak.stock_zh_index_daily(symbol=symbol)
-        # 标准化列名
-        df = df.rename(columns={
-            'date': 'date',
-            'open': 'open',
-            'high': 'high',
-            'low': 'low',
-            'close': 'close',
-            'volume': 'volume'
-        })
+            df = retry_request(lambda: ak.index_zh_daily_sina(symbol=symbol))
+
+        required_columns = {'date', 'open', 'high', 'low', 'close', 'volume'}
+        missing_columns = required_columns.difference(df.columns)
+        if missing_columns:
+            raise ValueError(f"指数接口缺少必要列: {sorted(missing_columns)}")
+
         # 确保日期格式
         df['date'] = pd.to_datetime(df['date'])
         # 按日期筛选
@@ -842,14 +846,34 @@ def fetch_all_index_data(start_date: str = None,
 
 def fetch_cpi_yearly() -> pd.DataFrame:
     """
-    获取中国年度 CPI 数据
+    获取中国 CPI 同比数据，并转换为项目既有的日期/同比增长结构。
+
+    AKShare 1.20.42 删除了 macro_china_cpi_yearly；替代接口
+    macro_china_cpi 返回月度宽表，本函数保留全国同比增长列供后续按年处理。
 
     Returns:
-        DataFrame: 包含年份和 CPI 值的数据
+        DataFrame: 包含日期和 CPI 同比增长率的数据
     """
     try:
-        df = ak.macro_china_cpi_yearly()
-        return df
+        df = retry_request(lambda: ak.macro_china_cpi())
+        required_columns = {'月份', '全国-同比增长'}
+        missing_columns = required_columns.difference(df.columns)
+        if missing_columns:
+            raise ValueError(f"CPI接口缺少必要列: {sorted(missing_columns)}")
+
+        result = df[['月份', '全国-同比增长']].copy()
+        date_parts = result['月份'].astype(str).str.extract(
+            r'(?P<year>\d{4})年(?P<month>\d{1,2})月'
+        )
+        result['日期'] = pd.to_datetime(
+            date_parts['year'] + '-' + date_parts['month'].str.zfill(2) + '-01',
+            errors='coerce',
+        )
+        result['CPI同比增长'] = pd.to_numeric(
+            result['全国-同比增长'], errors='coerce'
+        )
+        result = result[['日期', 'CPI同比增长']].dropna()
+        return result.sort_values('日期').reset_index(drop=True)
     except Exception as e:
         raise Exception(f"获取CPI数据失败: {str(e)}")
 
@@ -858,8 +882,9 @@ def calculate_daily_cpi_growth(cpi_yearly_df: pd.DataFrame) -> pd.DataFrame:
     """
     计算每年的日复利增长率
 
-    注意：ak.macro_china_cpi_yearly() 返回的是 CPI 同比增长率（百分比形式）
-    例如：1995年1月的值为 25.5，表示相对于1994年1月增长了25.5%
+    注意：fetch_cpi_yearly() 已将 macro_china_cpi() 的全国同比增长率
+    标准化为百分比形式
+    例如：同比值为 0.7，表示相对于上年同月增长了 0.7%
 
     计算公式：
     (1 + CPI_daily)^250 = 1 + (annual_rate / 100)
@@ -1366,38 +1391,55 @@ def fetch_stock_financial_abstract_ths_yearly(symbol: str) -> pd.DataFrame:
         DataFrame: 包含多年的营业总收入、每股净资产、销售净利润、销售毛利率、净资产收益率等
     """
     try:
-        df = ak.stock_financial_abstract_ths(symbol=symbol, indicator="按报告期")
+        df = retry_request(
+            lambda: ak.stock_financial_key_indicator_ths(
+                symbol=symbol,
+                indicator="按报告期",
+            )
+        )
         if df.empty:
             return pd.DataFrame()
 
-        # 筛选年报数据（报告期以12-31结尾）
-        df['报告期'] = df['报告期'].astype(str)
-        annual_df = df[df['报告期'].str.endswith('12-31')].copy()
+        # 新接口返回长表：每行是一个报告期下的一个英文指标。
+        required_columns = {'report_date', 'metric_name', 'value'}
+        missing_columns = required_columns.difference(df.columns)
+        if missing_columns:
+            raise ValueError(f"同花顺财务接口缺少必要列: {sorted(missing_columns)}")
 
-        # 筛选2020年及以后的数据
-        annual_df = annual_df[annual_df['报告期'] >= '2020-12-31']
-
-        # 选择需要的列
-        columns_map = {
-            '报告期': '报告期',
-            '营业总收入': '营业总收入',
-            '每股净资产': '每股净资产',
-            '销售净利率': '销售净利率',
-            '销售毛利率': '销售毛利率',
+        metric_map = {
+            'operating_income_total': '营业总收入',
+            'calc_per_net_assets': '每股净资产',
+            'sale_net_interest_ratio': '销售净利率',
+            'sale_gross_margin': '销售毛利率',
+            'index_full_diluted_roe': '净资产收益率',
         }
 
-        # 处理净资产收益率（可能有不同列名）
-        if '净资产收益率-摊薄' in annual_df.columns:
-            columns_map['净资产收益率-摊薄'] = '净资产收益率'
-        elif '净资产收益率' in annual_df.columns:
-            columns_map['净资产收益率'] = '净资产收益率'
+        annual_df = df[
+            df['report_date'].astype(str).str.endswith('12-31')
+            & (df['report_date'].astype(str) >= '2020-12-31')
+            & df['metric_name'].isin(metric_map)
+        ][['report_date', 'metric_name', 'value']].copy()
+        if annual_df.empty:
+            return pd.DataFrame()
 
-        # 只保留存在的列
-        available_cols = [col for col in columns_map.keys() if col in annual_df.columns]
-        result_df = annual_df[available_cols].copy()
-        result_df.columns = [columns_map[col] for col in available_cols]
+        # 转回项目原先使用的宽表，保持上层合并及图表字段不变。
+        result_df = (
+            annual_df.drop_duplicates(['report_date', 'metric_name'])
+            .pivot(index='report_date', columns='metric_name', values='value')
+            .rename(columns=metric_map)
+            .rename_axis(columns=None)
+            .reset_index()
+            .rename(columns={'report_date': '报告期'})
+        )
+        value_columns = [col for col in metric_map.values() if col in result_df.columns]
+        for column in value_columns:
+            result_df[column] = _to_numeric_series(result_df[column])
 
-        return result_df
+        return (
+            result_df[['报告期', *value_columns]]
+            .sort_values('报告期')
+            .reset_index(drop=True)
+        )
     except Exception as e:
         return pd.DataFrame({'error': [str(e)]})
 

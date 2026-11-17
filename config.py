@@ -54,7 +54,7 @@ FINANCE_KEYWORDS = ['证券', '保险', '券商', '基金', '信托', '金融']
 INDEX_START_DATE = "19940103"
 
 # 指数符号配置
-# akshare 接口支持的指数（使用 stock_zh_index_daily）
+# AKShare 接口支持的指数（使用 index_zh_daily_sina/index_zh_daily_tx）
 INDEX_SYMBOLS_AKSHARE = {
     '上证综合指数': 'sh000001',
     '深证成份指数': 'sz399001',
@@ -174,4 +174,3 @@ STOCK_EXCHANGE_SUFFIX = {
     '600690': '.SH',
     '000651': '.SZ',
 }
-
