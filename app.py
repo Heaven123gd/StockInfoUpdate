@@ -515,9 +515,13 @@ with tab5:
                     cpi_yearly = fetch_cpi_yearly()
                     st.session_state.cpi_yearly = cpi_yearly
                     st.session_state.cpi_error = None
+                    st.session_state.cpi_warning = cpi_yearly.attrs.get(
+                        'latest_error'
+                    )
                 except Exception as e:
                     st.session_state.cpi_yearly = None
                     st.session_state.cpi_error = str(e)
+                    st.session_state.cpi_warning = None
 
             # 进行通胀调整和回归分析
             if st.session_state.get('cpi_yearly') is not None:
@@ -538,6 +542,10 @@ with tab5:
         # 显示错误信息
         if st.session_state.get('cpi_error'):
             st.error(f"CPI数据获取失败: {st.session_state.cpi_error}")
+        if st.session_state.get('cpi_warning'):
+            st.warning(
+                "最新CPI接口暂时不可用，当前使用本地国家统计局历史备份。"
+            )
 
         # 显示分析结果
         if st.session_state.get('adjusted_data') and st.session_state.get('regression_results'):

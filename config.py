@@ -113,6 +113,10 @@ TRADING_DAYS_PER_YEAR = 250  # 每年交易日天数
 # CPI 基准配置
 BASE_CPI_VALUE = 1  # 基准 CPI 值（1994年1月1日）
 BASE_CPI_YEAR = 1994   # 基准年份
+CPI_ANNUAL_HISTORY_FILE = os.path.join(
+    os.path.dirname(__file__),
+    'cpi_annual_history.csv',
+)
 
 # 分布图配置
 HISTOGRAM_BINS = 50     # 直方图分箱数量

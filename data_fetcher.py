@@ -16,7 +16,7 @@ from config import (
     FINANCE_KEYWORDS, BANK_KEYWORDS,
     INDEX_SYMBOLS_AKSHARE, INDEX_SYMBOLS_LOCAL,
     INDEX_START_DATE, find_local_index_file,
-    TRADING_DAYS_PER_YEAR, BASE_CPI_VALUE,
+    TRADING_DAYS_PER_YEAR, BASE_CPI_VALUE, CPI_ANNUAL_HISTORY_FILE,
     DJI_SYMBOL, DJI_NAME, COMPARISON_START_DATE,
     FEATURED_STOCKS, STOCK_EXCHANGE_SUFFIX
 )
@@ -847,34 +847,107 @@ def fetch_all_index_data(start_date: str = None,
 
 def fetch_cpi_yearly() -> pd.DataFrame:
     """
-    获取中国 CPI 同比数据，并转换为项目既有的日期/同比增长结构。
+    获取中国年度 CPI 增长率。
 
-    AKShare 1.20.42 删除了 macro_china_cpi_yearly；替代接口
-    macro_china_cpi 返回月度宽表，本函数保留全国同比增长列供后续按年处理。
+    1986 年起的完整年度历史来自项目内国家统计局备份；备份最后一年之后
+    使用 macro_china_cpi 的全国累计指数补充。全国累计指数减 100 后，
+    表示当年截至最新月份的累计 CPI 增长率；12 月值与年度 CPI 口径一致。
 
     Returns:
-        DataFrame: 包含日期和 CPI 同比增长率的数据
+        DataFrame: 包含日期、年度 CPI 增长率和数据来源
     """
     try:
-        df = retry_request(lambda: ak.macro_china_cpi())
-        required_columns = {'月份', '全国-同比增长'}
-        missing_columns = required_columns.difference(df.columns)
-        if missing_columns:
-            raise ValueError(f"CPI接口缺少必要列: {sorted(missing_columns)}")
+        history_df = pd.read_csv(CPI_ANNUAL_HISTORY_FILE)
+        history_required = {'year', 'annual_rate_pct', 'source'}
+        missing_history_columns = history_required.difference(history_df.columns)
+        if missing_history_columns:
+            raise ValueError(
+                f"CPI历史备份缺少必要列: {sorted(missing_history_columns)}"
+            )
 
-        result = df[['月份', '全国-同比增长']].copy()
-        date_parts = result['月份'].astype(str).str.extract(
-            r'(?P<year>\d{4})年(?P<month>\d{1,2})月'
+        history_df = history_df[['year', 'annual_rate_pct', 'source']].copy()
+        history_df['year'] = pd.to_numeric(history_df['year'], errors='coerce')
+        history_df['annual_rate_pct'] = pd.to_numeric(
+            history_df['annual_rate_pct'], errors='coerce'
         )
-        result['日期'] = pd.to_datetime(
-            date_parts['year'] + '-' + date_parts['month'].str.zfill(2) + '-01',
-            errors='coerce',
+        history_df = history_df.dropna(subset=['year', 'annual_rate_pct'])
+        history_df['year'] = history_df['year'].astype(int)
+        history_df = history_df.drop_duplicates('year', keep='last')
+        if history_df.empty:
+            raise ValueError("CPI历史备份为空")
+
+        history_last_year = int(history_df['year'].max())
+        latest_error = None
+        try:
+            latest_df = retry_request(lambda: ak.macro_china_cpi())
+            latest_required = {'月份', '全国-累计'}
+            missing_columns = latest_required.difference(latest_df.columns)
+            if missing_columns:
+                raise ValueError(
+                    f"CPI接口缺少必要列: {sorted(missing_columns)}"
+                )
+
+            latest_df = latest_df[['月份', '全国-累计']].copy()
+            date_parts = latest_df['月份'].astype(str).str.extract(
+                r'(?P<year>\d{4})年(?P<month>\d{1,2})月'
+            )
+            latest_df['日期'] = pd.to_datetime(
+                date_parts['year'] + '-' + date_parts['month'].str.zfill(2) + '-01',
+                errors='coerce',
+            )
+            latest_df['annual_rate_pct'] = (
+                pd.to_numeric(latest_df['全国-累计'], errors='coerce') - 100
+            )
+            latest_df = latest_df.dropna(subset=['日期', 'annual_rate_pct'])
+            if latest_df.empty:
+                raise ValueError("最新CPI接口没有可用数据")
+            latest_df['year'] = latest_df['日期'].dt.year
+
+            # 每年取当前可用的最后一个月；完整年份即为 12 月累计值。
+            latest_annual = (
+                latest_df.sort_values('日期')
+                .drop_duplicates('year', keep='last')
+                [['year', '日期', 'annual_rate_pct']]
+            )
+            latest_annual = latest_annual[
+                latest_annual['year'] > history_last_year
+            ].copy()
+            latest_annual['source'] = '东方财富'
+        except Exception as latest_exception:
+            latest_error = str(latest_exception)
+            latest_annual = pd.DataFrame(
+                columns=['year', '日期', 'annual_rate_pct', 'source']
+            )
+
+        history_df['日期'] = pd.to_datetime(
+            history_df['year'].astype(str) + '-12-31'
         )
-        result['CPI同比增长'] = pd.to_numeric(
-            result['全国-同比增长'], errors='coerce'
+        combined = pd.concat(
+            [
+                history_df[['year', '日期', 'annual_rate_pct', 'source']],
+                latest_annual[['year', '日期', 'annual_rate_pct', 'source']],
+            ],
+            ignore_index=True,
         )
-        result = result[['日期', 'CPI同比增长']].dropna()
-        return result.sort_values('日期').reset_index(drop=True)
+        combined = (
+            combined.sort_values('year')
+            .drop_duplicates('year', keep='last')
+        )
+        combined['日期'] = pd.to_datetime(combined['日期'], errors='coerce')
+        combined['annual_rate_pct'] = pd.to_numeric(
+            combined['annual_rate_pct'], errors='coerce'
+        )
+        combined = combined.dropna(subset=['日期', 'annual_rate_pct'])
+        combined = combined.rename(columns={
+            'annual_rate_pct': 'CPI同比增长',
+            'source': '数据来源',
+        })
+        result = combined[['日期', 'CPI同比增长', '数据来源']].reset_index(
+            drop=True
+        )
+        if latest_error:
+            result.attrs['latest_error'] = latest_error
+        return result
     except Exception as e:
         raise Exception(f"获取CPI数据失败: {str(e)}")
 
@@ -883,9 +956,8 @@ def calculate_daily_cpi_growth(cpi_yearly_df: pd.DataFrame) -> pd.DataFrame:
     """
     计算每年的日复利增长率
 
-    注意：fetch_cpi_yearly() 已将 macro_china_cpi() 的全国同比增长率
-    标准化为百分比形式
-    例如：同比值为 0.7，表示相对于上年同月增长了 0.7%
+    注意：fetch_cpi_yearly() 返回年度 CPI 增长率（百分比形式）。
+    例如：年度值为 2.5，表示全年居民消费价格比上年增长 2.5%。
 
     计算公式：
     (1 + CPI_daily)^250 = 1 + (annual_rate / 100)
