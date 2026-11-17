@@ -115,13 +115,24 @@ def _parse_szse_summary_excel(content: bytes) -> pd.DataFrame:
     if df.empty:
         raise ValueError("深交所返回的数据为空")
 
-    if '证券类别' in df.columns:
-        df = df[['证券类别', '数量', '成交金额', '总市值', '流通市值']].copy()
-    else:
-        if df.shape[1] < 5:
-            raise ValueError(f"深交所返回列数不足，可用列: {list(df.columns)}")
-        df = df.iloc[:, :5].copy()
-        df.columns = ['证券类别', '数量', '成交金额', '总市值', '流通市值']
+    # 深交所新版 Excel 在数值列名中增加了单位；统一映射回项目既有字段，
+    # 同时保留对历史无单位列名的兼容。
+    df.columns = [str(column).strip() for column in df.columns]
+    df = df.rename(columns={
+        '数量(只)': '数量',
+        '成交金额(元)': '成交金额',
+        '总市值(元)': '总市值',
+        '流通市值(元)': '流通市值',
+    })
+
+    required_columns = ['证券类别', '数量', '成交金额', '总市值', '流通市值']
+    missing_columns = [column for column in required_columns if column not in df.columns]
+    if missing_columns:
+        raise ValueError(
+            f"深交所返回字段发生变化，缺少列: {missing_columns}；"
+            f"可用列: {list(df.columns)}"
+        )
+    df = df[required_columns].copy()
 
     df['证券类别'] = df['证券类别'].astype(str).str.strip()
     df = df[df['证券类别'].notna() & (df['证券类别'] != '') & (df['证券类别'] != 'nan')]
@@ -141,10 +152,7 @@ def _parse_szse_summary_excel(content: bytes) -> pd.DataFrame:
 
 def _fetch_szse_summary_by_date(date: str) -> pd.DataFrame:
     """直接从深交所接口获取指定日期市场总貌，避免 AKShare 对错误响应读 Excel。"""
-    urls = [
-        "https://www.szse.cn/api/report/ShowReport",
-        "http://www.szse.cn/api/report/ShowReport",
-    ]
+    url = "https://www.szse.cn/api/report/ShowReport"
     params = {
         "SHOWTYPE": "xlsx",
         "CATALOGID": "1803_sczm",
@@ -159,16 +167,9 @@ def _fetch_szse_summary_by_date(date: str) -> pd.DataFrame:
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
         ),
     }
-    errors = []
-    for url in urls:
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=20)
-            response.raise_for_status()
-            return _parse_szse_summary_excel(response.content)
-        except Exception as e:
-            errors.append(str(e))
-
-    raise Exception("；".join(errors))
+    response = requests.get(url, params=params, headers=headers, timeout=20)
+    response.raise_for_status()
+    return _parse_szse_summary_excel(response.content)
 
 
 def fetch_szse_summary(date: str) -> pd.DataFrame:
