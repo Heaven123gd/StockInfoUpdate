@@ -17,6 +17,8 @@ from config import (
     INDEX_SYMBOLS_AKSHARE, INDEX_SYMBOLS_LOCAL,
     INDEX_START_DATE, find_local_index_file,
     TRADING_DAYS_PER_YEAR, BASE_CPI_VALUE, CPI_ANNUAL_HISTORY_FILE,
+    NBS_CPI_CATALOG_ID, NBS_CPI_AREA_CODE,
+    NBS_CPI_INDICATOR_URL, NBS_CPI_DATA_URL,
     DJI_SYMBOL, DJI_NAME, COMPARISON_START_DATE,
     FEATURED_STOCKS, STOCK_EXCHANGE_SUFFIX
 )
@@ -845,13 +847,139 @@ def fetch_all_index_data(start_date: str = None,
 # CPI 数据获取与处理函数
 # =====================
 
+def _request_nbs_json(method: str, url: str, **kwargs) -> dict:
+    """请求国家统计局官网并校验公共 JSON 响应。"""
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 Chrome/124.0 Safari/537.36'
+        ),
+        'Accept': 'application/json, text/plain, */*',
+    }
+    if method.upper() == 'POST':
+        headers['Content-Type'] = 'application/json;charset=UTF-8'
+
+    response = requests.request(
+        method=method,
+        url=url,
+        headers=headers,
+        timeout=20,
+        **kwargs,
+    )
+    response.raise_for_status()
+    data_json = response.json()
+    if not data_json.get('success'):
+        raise ValueError(
+            f"国家统计局接口返回失败: {data_json.get('message', '未知错误')}"
+        )
+    return data_json
+
+
+def _find_nbs_cpi_indicator_id() -> str:
+    """从国家统计局指标目录中定位全国 CPI 同比指数。"""
+    data_json = retry_request(
+        lambda: _request_nbs_json(
+            'GET',
+            NBS_CPI_INDICATOR_URL,
+            params={'cid': NBS_CPI_CATALOG_ID},
+        )
+    )
+    indicators = data_json.get('data', {}).get('list', [])
+    for item in indicators:
+        is_headline_cpi = (
+            item.get('_name') == '居民消费价格指数'
+            and not item.get('kj2')
+            and '上年同月=100' in str(item.get('kj1_name', ''))
+        )
+        if is_headline_cpi and item.get('_id'):
+            return item['_id']
+    raise ValueError('国家统计局指标目录中未找到全国居民消费价格指数')
+
+
+def _fetch_nbs_cpi_yearly_after(start_year: int) -> pd.DataFrame:
+    """
+    获取国家统计局官网从 start_year 起的年度/年内累计 CPI 增长率。
+
+    官网返回月度“上年同月=100”指数。完整年份取 12 个月指数的平均值，
+    当前年份取已发布月份的平均值；减 100 后即为年度或年内累计涨跌幅。
+    """
+    current_date = datetime.now()
+    if start_year > current_date.year:
+        return pd.DataFrame(
+            columns=['year', '日期', 'annual_rate_pct', 'source']
+        )
+
+    indicator_id = _find_nbs_cpi_indicator_id()
+    period = (
+        f'{start_year}01MM-'
+        f'{current_date.year}{current_date.month:02d}MM'
+    )
+    payload = {
+        'cid': NBS_CPI_CATALOG_ID,
+        'id': indicator_id,
+        'da': NBS_CPI_AREA_CODE,
+        'dt': '',
+        'dts': [period],
+        'rootId': '',
+    }
+    data_json = retry_request(
+        lambda: _request_nbs_json(
+            'POST', NBS_CPI_DATA_URL, json=payload
+        )
+    )
+    monthly_df = pd.DataFrame(data_json.get('data', []))
+    required_columns = {'dt', 'v'}
+    missing_columns = required_columns.difference(monthly_df.columns)
+    if missing_columns:
+        raise ValueError(
+            f"国家统计局 CPI 数据缺少必要列: {sorted(missing_columns)}"
+        )
+
+    date_parts = monthly_df['dt'].astype(str).str.extract(
+        r'(?P<year>\d{4})(?P<month>\d{2})MM'
+    )
+    monthly_df['日期'] = pd.to_datetime(
+        date_parts['year'] + '-' + date_parts['month'] + '-01',
+        errors='coerce',
+    )
+    monthly_df['cpi_yoy_index'] = pd.to_numeric(
+        monthly_df['v'], errors='coerce'
+    )
+    monthly_df = monthly_df.dropna(subset=['日期', 'cpi_yoy_index'])
+    monthly_df = monthly_df[
+        monthly_df['cpi_yoy_index'].between(50, 150)
+    ].copy()
+    if monthly_df.empty:
+        raise ValueError('国家统计局官网没有返回可用的 CPI 数据')
+
+    monthly_df['year'] = monthly_df['日期'].dt.year
+    monthly_df = monthly_df[monthly_df['year'] >= start_year]
+    if monthly_df.empty:
+        return pd.DataFrame(
+            columns=['year', '日期', 'annual_rate_pct', 'source']
+        )
+
+    yearly_df = (
+        monthly_df.groupby('year', as_index=False)
+        .agg(
+            日期=('日期', 'max'),
+            cpi_yoy_index=('cpi_yoy_index', 'mean'),
+        )
+    )
+    yearly_df['annual_rate_pct'] = (
+        yearly_df['cpi_yoy_index'] - 100
+    ).round(1)
+    yearly_df['source'] = '国家统计局官网'
+    return yearly_df[['year', '日期', 'annual_rate_pct', 'source']]
+
+
 def fetch_cpi_yearly() -> pd.DataFrame:
     """
     获取中国年度 CPI 增长率。
 
     1986 年起的完整年度历史来自项目内国家统计局备份；备份最后一年之后
-    使用 macro_china_cpi 的全国累计指数补充。全国累计指数减 100 后，
-    表示当年截至最新月份的累计 CPI 增长率；12 月值与年度 CPI 口径一致。
+    直接使用国家统计局“国家数据”官网月度 CPI 补充。完整年份取 12 个月
+    同比指数的平均值，当前年份取已发布月份的平均值。
 
     Returns:
         DataFrame: 包含日期、年度 CPI 增长率和数据来源
@@ -879,40 +1007,9 @@ def fetch_cpi_yearly() -> pd.DataFrame:
         history_last_year = int(history_df['year'].max())
         latest_error = None
         try:
-            latest_df = retry_request(lambda: ak.macro_china_cpi())
-            latest_required = {'月份', '全国-累计'}
-            missing_columns = latest_required.difference(latest_df.columns)
-            if missing_columns:
-                raise ValueError(
-                    f"CPI接口缺少必要列: {sorted(missing_columns)}"
-                )
-
-            latest_df = latest_df[['月份', '全国-累计']].copy()
-            date_parts = latest_df['月份'].astype(str).str.extract(
-                r'(?P<year>\d{4})年(?P<month>\d{1,2})月'
+            latest_annual = _fetch_nbs_cpi_yearly_after(
+                history_last_year + 1
             )
-            latest_df['日期'] = pd.to_datetime(
-                date_parts['year'] + '-' + date_parts['month'].str.zfill(2) + '-01',
-                errors='coerce',
-            )
-            latest_df['annual_rate_pct'] = (
-                pd.to_numeric(latest_df['全国-累计'], errors='coerce') - 100
-            )
-            latest_df = latest_df.dropna(subset=['日期', 'annual_rate_pct'])
-            if latest_df.empty:
-                raise ValueError("最新CPI接口没有可用数据")
-            latest_df['year'] = latest_df['日期'].dt.year
-
-            # 每年取当前可用的最后一个月；完整年份即为 12 月累计值。
-            latest_annual = (
-                latest_df.sort_values('日期')
-                .drop_duplicates('year', keep='last')
-                [['year', '日期', 'annual_rate_pct']]
-            )
-            latest_annual = latest_annual[
-                latest_annual['year'] > history_last_year
-            ].copy()
-            latest_annual['source'] = '东方财富'
         except Exception as latest_exception:
             latest_error = str(latest_exception)
             latest_annual = pd.DataFrame(
@@ -922,13 +1019,14 @@ def fetch_cpi_yearly() -> pd.DataFrame:
         history_df['日期'] = pd.to_datetime(
             history_df['year'].astype(str) + '-12-31'
         )
-        combined = pd.concat(
-            [
-                history_df[['year', '日期', 'annual_rate_pct', 'source']],
-                latest_annual[['year', '日期', 'annual_rate_pct', 'source']],
-            ],
-            ignore_index=True,
-        )
+        combined_frames = [
+            history_df[['year', '日期', 'annual_rate_pct', 'source']]
+        ]
+        if not latest_annual.empty:
+            combined_frames.append(
+                latest_annual[['year', '日期', 'annual_rate_pct', 'source']]
+            )
+        combined = pd.concat(combined_frames, ignore_index=True)
         combined = (
             combined.sort_values('year')
             .drop_duplicates('year', keep='last')

@@ -11,7 +11,7 @@ import os
 # 设置请求超时时间（解决云端部署时的网络问题）
 os.environ['AKSHARE_TIMEOUT'] = '60'
 
-from config import APP_TITLE, APP_ICON
+from config import APP_TITLE, APP_ICON, CPI_DATA_VERSION
 from data_fetcher import (
     fetch_sse_summary,
     fetch_szse_summary,
@@ -51,6 +51,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# CPI 数据源/口径变更后，避免继续显示旧部署会话中的计算结果。
+if st.session_state.get('_cpi_data_version') != CPI_DATA_VERSION:
+    for state_key in (
+        'cpi_yearly', 'cpi_error', 'cpi_warning',
+        'adjusted_data', 'regression_results', 'adj_errors',
+    ):
+        st.session_state.pop(state_key, None)
+    st.session_state._cpi_data_version = CPI_DATA_VERSION
 
 # =====================
 # 侧边栏：参数设置
@@ -544,7 +553,19 @@ with tab5:
             st.error(f"CPI数据获取失败: {st.session_state.cpi_error}")
         if st.session_state.get('cpi_warning'):
             st.warning(
-                "最新CPI接口暂时不可用，当前使用本地国家统计局历史备份。"
+                "国家统计局官网最新CPI暂时不可用，当前仅使用项目内的"
+                "国家统计局历史备份，未使用其他数据源。"
+            )
+        if st.session_state.get('cpi_yearly') is not None:
+            cpi_display_df = st.session_state.cpi_yearly.sort_values('日期')
+            latest_cpi = cpi_display_df.iloc[-1]
+            source_text = '、'.join(
+                cpi_display_df['数据来源'].dropna().astype(str).unique()
+            )
+            st.caption(
+                f"CPI数据来源：{source_text}；最新数据："
+                f"{latest_cpi['日期']:%Y-%m}，"
+                f"累计同比 {latest_cpi['CPI同比增长']:.1f}%"
             )
 
         # 显示分析结果

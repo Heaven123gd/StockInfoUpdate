@@ -117,6 +117,20 @@ CPI_ANNUAL_HISTORY_FILE = os.path.join(
     os.path.dirname(__file__),
     'cpi_annual_history.csv',
 )
+# CPI 数据来源或处理口径变更时更新该版本号，用于清理 Streamlit 旧会话结果。
+CPI_DATA_VERSION = 'nbs_official_v1'
+
+# 国家统计局“国家数据”官网 CPI 配置。
+NBS_CPI_CATALOG_ID = '5c7452825c7c4dcba391db5ca7f335c5'
+NBS_CPI_AREA_CODE = '000000000000'
+NBS_CPI_INDICATOR_URL = (
+    'https://data.stats.gov.cn/dg/website/publicrelease/web/external/new/'
+    'queryIndicatorsByCid'
+)
+NBS_CPI_DATA_URL = (
+    'https://data.stats.gov.cn/dg/website/publicrelease/web/external/'
+    'getEsDataByIndicatorIdAndDa'
+)
 
 # 分布图配置
 HISTOGRAM_BINS = 50     # 直方图分箱数量
