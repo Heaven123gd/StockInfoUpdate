@@ -8,6 +8,7 @@ import numpy as np
 import time
 import requests
 import re
+import json
 from datetime import datetime
 from hashlib import md5
 from io import BytesIO
@@ -66,6 +67,162 @@ def retry_request(func, max_retries=3, delay=2):
     raise last_error
 
 
+_SSE_SUMMARY_PRODUCTS = ('股票', '主板', '科创板')
+_SSE_SUMMARY_FIELDS = (
+    ('NEGO_ISSUE_VOL', '流通股本'),
+    ('TOTAL_VALUE', '总市值'),
+    ('AVG_PE_RATIO', '平均市盈率'),
+    ('LIST_COM_NUM', '上市公司'),
+    ('SECURITY_NUM', '上市股票'),
+    ('NEGO_VALUE', '流通市值'),
+    ('TRADE_DATE', '报告时间'),
+    ('TOTAL_ISSUE_VOL', '总股本'),
+)
+
+
+def _response_preview(text: str, limit: int = 180) -> str:
+    """压缩响应内容，供错误信息定位，避免输出整张拦截页面。"""
+    compact = re.sub(r'\s+', ' ', text or '').strip()
+    return compact[:limit] or '<空响应>'
+
+
+def _build_sse_summary_dataframe(records) -> pd.DataFrame:
+    """按上交所字段名解析市场总貌记录，避免依赖 JSON 字段顺序。"""
+    if isinstance(records, dict):
+        records = records.get('data', records.get('rows', records))
+
+    if not isinstance(records, list) or not records:
+        raise ValueError("上交所响应中的 result 不是非空记录列表")
+
+    raw_df = pd.DataFrame(records)
+    if 'PRODUCT_NAME' not in raw_df.columns:
+        raise ValueError(
+            "上交所 result 缺少 PRODUCT_NAME 字段；"
+            f"实际字段: {list(raw_df.columns)}"
+        )
+
+    missing_fields = [
+        field for field, _ in _SSE_SUMMARY_FIELDS if field not in raw_df.columns
+    ]
+    if missing_fields:
+        raise ValueError(f"上交所 result 缺少字段: {missing_fields}")
+
+    raw_df = raw_df.copy()
+    raw_df['PRODUCT_NAME'] = raw_df['PRODUCT_NAME'].astype(str).str.strip()
+    raw_df = raw_df.drop_duplicates('PRODUCT_NAME').set_index('PRODUCT_NAME')
+    missing_products = [
+        product for product in _SSE_SUMMARY_PRODUCTS if product not in raw_df.index
+    ]
+    if missing_products:
+        raise ValueError(f"上交所 result 缺少产品分类: {missing_products}")
+
+    rows = []
+    for field, label in _SSE_SUMMARY_FIELDS:
+        row = {'项目': label}
+        for product in _SSE_SUMMARY_PRODUCTS:
+            row[product] = raw_df.at[product, field]
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=['项目', *_SSE_SUMMARY_PRODUCTS])
+
+
+def _parse_sse_summary_payload(content: bytes) -> pd.DataFrame:
+    """解析上交所 JSON，并兼容可能出现的 BOM 和 JSONP 包装。"""
+    text = content.decode('utf-8-sig', errors='replace').strip()
+    if not text:
+        raise ValueError("上交所返回空响应")
+    if text.startswith('<'):
+        raise ValueError(f"上交所返回 HTML 而不是 JSON: {_response_preview(text)}")
+
+    # 部分上交所接口会在指定回调参数时返回 callback({...})。
+    jsonp_match = re.fullmatch(r'[\w.$]+\s*\((.*)\)\s*;?', text, flags=re.S)
+    json_text = jsonp_match.group(1) if jsonp_match else text
+    try:
+        payload = json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"上交所返回内容不是有效 JSON: {_response_preview(text)}"
+        ) from exc
+
+    if isinstance(payload, list):
+        records = payload
+    elif isinstance(payload, dict):
+        records = payload.get('result')
+        if not records:
+            action_errors = payload.get('actionErrors') or payload.get('actionMessages')
+            raise ValueError(
+                "上交所 JSON 中 result 为空"
+                + (f"；服务端信息: {action_errors}" if action_errors else '')
+            )
+    else:
+        raise ValueError(f"上交所 JSON 顶层类型异常: {type(payload).__name__}")
+
+    return _build_sse_summary_dataframe(records)
+
+
+def _normalize_sse_summary_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """兼容 AKShare 已整理的数据，以及未来可能直接返回的英文记录表。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("AKShare 上交所总貌接口返回空数据")
+
+    normalized = df.copy()
+    normalized.columns = [str(column).strip() for column in normalized.columns]
+    expected_columns = ['项目', *_SSE_SUMMARY_PRODUCTS]
+    if set(expected_columns).issubset(normalized.columns):
+        normalized = normalized[expected_columns]
+        normalized['项目'] = normalized['项目'].astype(str).str.strip()
+        missing_items = [
+            label for _, label in _SSE_SUMMARY_FIELDS
+            if label not in set(normalized['项目'])
+        ]
+        if missing_items:
+            raise ValueError(f"AKShare 上交所总貌数据缺少项目: {missing_items}")
+        return normalized
+
+    if 'PRODUCT_NAME' in normalized.columns:
+        return _build_sse_summary_dataframe(normalized.to_dict('records'))
+
+    raise ValueError(
+        "AKShare 上交所总貌接口返回格式异常；"
+        f"实际字段: {list(normalized.columns)}"
+    )
+
+
+def _fetch_sse_summary_https() -> pd.DataFrame:
+    """直接使用上交所 HTTPS 接口，规避 AKShare 1.20.65 的 HTTP/JSON 解析问题。"""
+    url = 'https://query.sse.com.cn/commonQuery.do'
+    params = {
+        'sqlId': 'COMMON_SSE_SJ_GPSJ_GPSJZM_TJSJ_L',
+        'PRODUCT_NAME': '股票,主板,科创板',
+        'type': 'inParams',
+    }
+    headers = {
+        'Referer': 'https://www.sse.com.cn/market/stockdata/statistic/',
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/138.0.0.0 Safari/537.36'
+        ),
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+    }
+    response = requests.get(url, params=params, headers=headers, timeout=(10, 30))
+    content_type = response.headers.get('Content-Type', '未知')
+    if not response.ok:
+        preview = _response_preview(response.text)
+        raise ValueError(
+            f"上交所 HTTPS 接口返回 HTTP {response.status_code}；"
+            f"Content-Type={content_type}；内容={preview}"
+        )
+
+    try:
+        return _parse_sse_summary_payload(response.content)
+    except ValueError as exc:
+        raise ValueError(
+            f"上交所 HTTPS 接口响应格式异常（HTTP {response.status_code}，"
+            f"Content-Type={content_type}）: {exc}"
+        ) from exc
+
+
 def fetch_sse_summary() -> pd.DataFrame:
     """
     获取上交所市场统计数据
@@ -73,32 +230,38 @@ def fetch_sse_summary() -> pd.DataFrame:
     Returns:
         DataFrame: 上交所统计数据（流通股本、总市值、上市公司数等）
     """
+    errors = []
+
     try:
         if not hasattr(ak, 'stock_summary_sse'):
             installed_version = getattr(ak, '__version__', '未知')
             raise RuntimeError(
-                f"当前 AKShare 版本 {installed_version} 不包含 "
-                "stock_summary_sse，请按 requirements.txt 重装依赖"
+                f"当前 AKShare 版本 {installed_version} 不包含 stock_summary_sse"
             )
-
-        df = retry_request(
+        akshare_df = retry_request(
             lambda: ak.stock_summary_sse(),
             max_retries=3,
             delay=2,
         )
-        required_columns = {'项目', '股票', '主板', '科创板'}
-        missing_columns = required_columns.difference(df.columns)
-        if df.empty or missing_columns:
-            raise ValueError(
-                f"AKShare 上交所总貌接口返回格式异常；"
-                f"缺少列: {sorted(missing_columns)}"
-            )
+        df = _normalize_sse_summary_dataframe(akshare_df)
         df.attrs['source'] = (
             f"AKShare {getattr(ak, '__version__', '')} stock_summary_sse"
         )
         return df
-    except Exception as e:
-        raise Exception(f"获取上交所数据失败: {str(e)}")
+    except Exception as exc:
+        errors.append(f"AKShare: {exc}")
+
+    # AKShare 1.20.65 内部仍请求 HTTP 地址并直接调用 r.json()；云端若收到
+    # 空响应或拦截页会抛出 JSONDecodeError。改用同一官方接口的 HTTPS 响应，
+    # 并按字段名解析，而不是依赖字段排列顺序。
+    try:
+        df = retry_request(_fetch_sse_summary_https, max_retries=3, delay=2)
+        df.attrs['source'] = '上海证券交易所 HTTPS 市场总貌接口'
+        return df
+    except Exception as exc:
+        errors.append(f"上交所 HTTPS 回退: {exc}")
+
+    raise Exception("获取上交所数据失败: " + "；".join(errors))
 
 
 def _format_yyyymmdd(date: str) -> str:
