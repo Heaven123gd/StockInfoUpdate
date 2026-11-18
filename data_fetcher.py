@@ -5,6 +5,7 @@
 
 import pandas as pd
 import numpy as np
+import json
 import time
 import requests
 import re
@@ -66,6 +67,111 @@ def retry_request(func, max_retries=3, delay=2):
     raise last_error
 
 
+def _fetch_sse_summary_official() -> pd.DataFrame:
+    """直接从上交所官网获取并解析市场总貌。"""
+    url = "https://query.sse.com.cn/commonQuery.do"
+    params = {
+        "sqlId": "COMMON_SSE_SJ_GPSJ_GPSJZM_TJSJ_L",
+        "PRODUCT_NAME": "股票,主板,科创板",
+        "type": "inParams",
+    }
+    headers = {
+        "Referer": "https://www.sse.com.cn/market/stockdata/statistic/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Cache-Control": "no-cache",
+    }
+    response = requests.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    response_text = response.content.decode("utf-8-sig", errors="replace").strip()
+    if not response_text:
+        raise ValueError(
+            f"上交所接口返回空内容（HTTP {response.status_code}）"
+        )
+
+    try:
+        data_json = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        content_type = response.headers.get("Content-Type", "未知")
+        response_preview = re.sub(r"\s+", " ", response_text[:160])
+        raise ValueError(
+            "上交所接口未返回有效 JSON："
+            f"HTTP {response.status_code}，Content-Type={content_type}，"
+            f"响应开头={response_preview!r}"
+        ) from exc
+
+    records = data_json.get("result") if isinstance(data_json, dict) else None
+    if not isinstance(records, list) or not records:
+        action_errors = (
+            data_json.get("actionErrors", [])
+            if isinstance(data_json, dict)
+            else []
+        )
+        raise ValueError(
+            f"上交所接口没有返回市场总貌数据；接口错误: {action_errors}"
+        )
+
+    records_by_product = {
+        str(item.get("PRODUCT_NAME", "")).strip(): item
+        for item in records
+        if isinstance(item, dict)
+    }
+    product_names = ["股票", "主板", "科创板"]
+    missing_products = [
+        name for name in product_names if name not in records_by_product
+    ]
+    if missing_products:
+        raise ValueError(
+            f"上交所市场总貌缺少分类: {missing_products}；"
+            f"实际分类: {list(records_by_product)}"
+        )
+
+    metric_fields = [
+        ("流通股本", "NEGO_ISSUE_VOL"),
+        ("总市值", "TOTAL_VALUE"),
+        ("平均市盈率", "AVG_PE_RATIO"),
+        ("上市公司", "LIST_COM_NUM"),
+        ("上市股票", "SECURITY_NUM"),
+        ("流通市值", "NEGO_VALUE"),
+        ("报告时间", "TRADE_DATE"),
+        ("总股本", "TOTAL_ISSUE_VOL"),
+    ]
+    rows = []
+    for metric_name, field_name in metric_fields:
+        row = {"项目": metric_name}
+        for product_name in product_names:
+            raw_value = records_by_product[product_name].get(field_name)
+            if metric_name == "报告时间":
+                row[product_name] = str(raw_value or "")
+            else:
+                value = pd.to_numeric(raw_value, errors="coerce")
+                if (
+                    metric_name in {"上市公司", "上市股票"}
+                    and pd.notna(value)
+                ):
+                    value = int(value)
+                row[product_name] = value
+        rows.append(row)
+
+    result = pd.DataFrame(rows, columns=["项目", *product_names])
+    report_date = records_by_product["股票"].get("TRADE_DATE")
+    if report_date:
+        result.attrs["actual_date"] = str(report_date)
+    result.attrs["source"] = "上海证券交易所官网"
+    return result
+
+
 def fetch_sse_summary() -> pd.DataFrame:
     """
     获取上交所市场统计数据
@@ -74,8 +180,7 @@ def fetch_sse_summary() -> pd.DataFrame:
         DataFrame: 上交所统计数据（流通股本、总市值、上市公司数等）
     """
     try:
-        df = retry_request(lambda: ak.stock_summary_sse())
-        return df
+        return retry_request(_fetch_sse_summary_official)
     except Exception as e:
         raise Exception(f"获取上交所数据失败: {str(e)}")
 
@@ -223,20 +328,6 @@ def fetch_stock_yjbb(date: str) -> pd.DataFrame:
         raise Exception(f"获取业绩报表数据失败: {str(e)}")
 
 
-def fetch_stock_code_name() -> pd.DataFrame:
-    """
-    获取A股股票代码和名称列表
-
-    Returns:
-        DataFrame: 包含 code 和 name 列的数据
-    """
-    try:
-        df = retry_request(lambda: ak.stock_info_a_code_name(), max_retries=5, delay=3)
-        return df
-    except Exception as e:
-        raise Exception(f"获取股票代码列表失败: {str(e)}")
-
-
 def fetch_profit_top100(report_date: str) -> Tuple[pd.DataFrame, dict]:
     """
     获取A股归母净利润前100强及统计信息
@@ -255,18 +346,31 @@ def fetch_profit_top100(report_date: str) -> Tuple[pd.DataFrame, dict]:
         - loss_count: 亏损公司数量
     """
     try:
-        # 获取股票代码名称
-        stock_info = fetch_stock_code_name()
-        # 获取业绩报表
-        yjbb = fetch_stock_yjbb(report_date)
-        # 合并数据
-        merged = pd.merge(
-            stock_info,
-            yjbb,
-            left_on='code',
-            right_on='股票代码',
-            how='inner'
+        # 业绩报表已经包含股票代码和名称。直接使用报表，避免额外请求
+        # 沪、深、北三个交易所的股票名单接口导致整页加载失败。
+        merged = fetch_stock_yjbb(report_date).copy()
+        required_columns = {
+            '股票代码', '股票简称', '净利润-净利润', '所处行业'
+        }
+        missing_columns = required_columns.difference(merged.columns)
+        if missing_columns:
+            raise ValueError(
+                f"业绩报表缺少必要列: {sorted(missing_columns)}；"
+                f"可用列: {list(merged.columns)}"
+            )
+
+        merged['股票代码'] = (
+            merged['股票代码']
+            .astype(str)
+            .str.strip()
+            .str.replace(r'\.0$', '', regex=True)
+            .str.zfill(6)
         )
+        merged = merged[
+            merged['股票代码'].str.fullmatch(r'\d{6}', na=False)
+        ].copy()
+        merged = merged.drop_duplicates(subset='股票代码', keep='first')
+
         # 按净利润排序取前100
         profit_col = '净利润-净利润'
         if profit_col in merged.columns:
