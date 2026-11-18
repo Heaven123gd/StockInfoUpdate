@@ -5,7 +5,6 @@
 
 import pandas as pd
 import numpy as np
-import json
 import time
 import requests
 import re
@@ -67,111 +66,6 @@ def retry_request(func, max_retries=3, delay=2):
     raise last_error
 
 
-def _fetch_sse_summary_official() -> pd.DataFrame:
-    """直接从上交所官网获取并解析市场总貌。"""
-    url = "https://query.sse.com.cn/commonQuery.do"
-    params = {
-        "sqlId": "COMMON_SSE_SJ_GPSJ_GPSJZM_TJSJ_L",
-        "PRODUCT_NAME": "股票,主板,科创板",
-        "type": "inParams",
-    }
-    headers = {
-        "Referer": "https://www.sse.com.cn/market/stockdata/statistic/",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Cache-Control": "no-cache",
-    }
-    response = requests.get(
-        url,
-        params=params,
-        headers=headers,
-        timeout=20,
-    )
-    response.raise_for_status()
-
-    response_text = response.content.decode("utf-8-sig", errors="replace").strip()
-    if not response_text:
-        raise ValueError(
-            f"上交所接口返回空内容（HTTP {response.status_code}）"
-        )
-
-    try:
-        data_json = json.loads(response_text)
-    except json.JSONDecodeError as exc:
-        content_type = response.headers.get("Content-Type", "未知")
-        response_preview = re.sub(r"\s+", " ", response_text[:160])
-        raise ValueError(
-            "上交所接口未返回有效 JSON："
-            f"HTTP {response.status_code}，Content-Type={content_type}，"
-            f"响应开头={response_preview!r}"
-        ) from exc
-
-    records = data_json.get("result") if isinstance(data_json, dict) else None
-    if not isinstance(records, list) or not records:
-        action_errors = (
-            data_json.get("actionErrors", [])
-            if isinstance(data_json, dict)
-            else []
-        )
-        raise ValueError(
-            f"上交所接口没有返回市场总貌数据；接口错误: {action_errors}"
-        )
-
-    records_by_product = {
-        str(item.get("PRODUCT_NAME", "")).strip(): item
-        for item in records
-        if isinstance(item, dict)
-    }
-    product_names = ["股票", "主板", "科创板"]
-    missing_products = [
-        name for name in product_names if name not in records_by_product
-    ]
-    if missing_products:
-        raise ValueError(
-            f"上交所市场总貌缺少分类: {missing_products}；"
-            f"实际分类: {list(records_by_product)}"
-        )
-
-    metric_fields = [
-        ("流通股本", "NEGO_ISSUE_VOL"),
-        ("总市值", "TOTAL_VALUE"),
-        ("平均市盈率", "AVG_PE_RATIO"),
-        ("上市公司", "LIST_COM_NUM"),
-        ("上市股票", "SECURITY_NUM"),
-        ("流通市值", "NEGO_VALUE"),
-        ("报告时间", "TRADE_DATE"),
-        ("总股本", "TOTAL_ISSUE_VOL"),
-    ]
-    rows = []
-    for metric_name, field_name in metric_fields:
-        row = {"项目": metric_name}
-        for product_name in product_names:
-            raw_value = records_by_product[product_name].get(field_name)
-            if metric_name == "报告时间":
-                row[product_name] = str(raw_value or "")
-            else:
-                value = pd.to_numeric(raw_value, errors="coerce")
-                if (
-                    metric_name in {"上市公司", "上市股票"}
-                    and pd.notna(value)
-                ):
-                    value = int(value)
-                row[product_name] = value
-        rows.append(row)
-
-    result = pd.DataFrame(rows, columns=["项目", *product_names])
-    report_date = records_by_product["股票"].get("TRADE_DATE")
-    if report_date:
-        result.attrs["actual_date"] = str(report_date)
-    result.attrs["source"] = "上海证券交易所官网"
-    return result
-
-
 def fetch_sse_summary() -> pd.DataFrame:
     """
     获取上交所市场统计数据
@@ -180,7 +74,29 @@ def fetch_sse_summary() -> pd.DataFrame:
         DataFrame: 上交所统计数据（流通股本、总市值、上市公司数等）
     """
     try:
-        return retry_request(_fetch_sse_summary_official)
+        if not hasattr(ak, 'stock_summary_sse'):
+            installed_version = getattr(ak, '__version__', '未知')
+            raise RuntimeError(
+                f"当前 AKShare 版本 {installed_version} 不包含 "
+                "stock_summary_sse，请按 requirements.txt 重装依赖"
+            )
+
+        df = retry_request(
+            lambda: ak.stock_summary_sse(),
+            max_retries=3,
+            delay=2,
+        )
+        required_columns = {'项目', '股票', '主板', '科创板'}
+        missing_columns = required_columns.difference(df.columns)
+        if df.empty or missing_columns:
+            raise ValueError(
+                f"AKShare 上交所总貌接口返回格式异常；"
+                f"缺少列: {sorted(missing_columns)}"
+            )
+        df.attrs['source'] = (
+            f"AKShare {getattr(ak, '__version__', '')} stock_summary_sse"
+        )
+        return df
     except Exception as e:
         raise Exception(f"获取上交所数据失败: {str(e)}")
 
