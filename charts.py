@@ -950,6 +950,7 @@ def display_market_pb_trends(
                     show_legend=False,
                 ),
                 use_container_width=True,
+                theme=None,
             )
             table_df = market_monthly_df[['日期', '市净率']].copy()
             table_df['日期'] = table_df['日期'].dt.strftime('%Y-%m-%d')
@@ -966,6 +967,7 @@ def display_market_pb_trends(
                     show_legend=False,
                 ),
                 use_container_width=True,
+                theme=None,
             )
         else:
             st.warning(f"暂无{market}周度市净率数据")
@@ -980,6 +982,7 @@ def display_market_pb_trends(
                 show_legend=True,
             ),
             use_container_width=True,
+            theme=None,
         )
 
     if not weekly_plot_df.empty:
@@ -991,6 +994,7 @@ def display_market_pb_trends(
                 show_legend=True,
             ),
             use_container_width=True,
+            theme=None,
         )
 
 
@@ -1035,7 +1039,7 @@ def _build_market_pb_chart(plot_df: pd.DataFrame, title: str, show_legend: bool 
             legend=legend,
             scale=alt.Scale(
                 domain=['上证', '深证', '创业板', '科创板'],
-                range=['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd']
+                range=['#0071e3', '#ff9f0a', '#34c759', '#af52de']
             )
         ),
     )
@@ -1049,10 +1053,47 @@ def _build_market_pb_chart(plot_df: pd.DataFrame, title: str, show_legend: bool 
         tooltip=tooltip
     )
 
-    return (line + points + rule).properties(
+    chart = (line + points + rule).properties(
         height=430,
-        title=title
-    ).interactive(bind_y=False)
+        background='#ffffff',
+        padding={
+            'top': 28,
+            'right': 20,
+            'bottom': 12,
+            'left': 12,
+        },
+        title=alt.TitleParams(
+            text=title,
+            anchor='start',
+            offset=20,
+            color='#1d1d1f',
+            font='-apple-system, BlinkMacSystemFont, PingFang SC, sans-serif',
+            fontSize=21,
+            fontWeight=600,
+        ),
+    ).configure_view(
+        fill='#ffffff',
+        stroke=None,
+    ).configure_axis(
+        domainColor='#d2d2d7',
+        gridColor='#e8e8ed',
+        gridOpacity=0.72,
+        labelColor='#6e6e73',
+        labelFontSize=12,
+        tickColor='#d2d2d7',
+        titleColor='#6e6e73',
+        titleFontSize=13,
+        titleFontWeight=500,
+        titlePadding=12,
+    ).configure_legend(
+        labelColor='#6e6e73',
+        labelFontSize=12,
+        titleColor='#1d1d1f',
+        titleFontSize=13,
+        titleFontWeight=600,
+    )
+
+    return chart.interactive(bind_y=False)
 
 
 # =====================

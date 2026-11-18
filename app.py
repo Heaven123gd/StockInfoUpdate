@@ -37,6 +37,7 @@ from charts import (
     display_featured_stocks,
     display_market_pb_trends,
 )
+from ui_styles import inject_apple_ui, render_apple_hero
 
 # =====================
 # 页面配置
@@ -47,6 +48,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+inject_apple_ui()
 
 # CPI 数据源/口径变更后，避免继续显示旧部署会话中的计算结果。
 if st.session_state.get('_cpi_data_version') != CPI_DATA_VERSION:
@@ -242,19 +244,18 @@ with st.sidebar:
 # =====================
 # 主页面
 # =====================
-st.title(f"{APP_ICON} {APP_TITLE}")
-st.markdown(f"**市场日期:** {market_date_str} | **报告期:** {selected_report}")
+render_apple_hero(market_date_str, selected_report)
 
 # 使用 tabs 组织内容
 tab1, tab_pb, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 市场统计",
-    "📐 市净率",
-    "🏆 归母净利润100强",
-    "🍰 利润分布",
-    "📈 指数走势",
-    "🧾 概率分布图",
-    "🌟 指数对比",
-    "🏢 主要股票数据"
+    "市场总览",
+    "市净率",
+    "利润百强",
+    "行业分布",
+    "指数走势",
+    "概率分析",
+    "指数对比",
+    "公司基本面"
 ])
 
 # =====================
