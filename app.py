@@ -6,10 +6,6 @@ A股市场数据可视化工具
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import os
-
-# 设置请求超时时间（解决云端部署时的网络问题）
-os.environ['AKSHARE_TIMEOUT'] = '60'
 
 from config import APP_TITLE, APP_ICON, CPI_DATA_VERSION
 from data_fetcher import (
@@ -667,7 +663,16 @@ with tab7:
         # 用户点击刷新 -> 从 API 获取最新数据
         a_progress = st.progress(0, text="正在从API并行获取A股最新数据...")
         try:
-            stocks_df, stocks_errors = fetch_all_featured_stocks_data()
+            def update_a_stock_progress(completed, total, task_name):
+                percent = int(completed / total * 100) if total else 0
+                a_progress.progress(
+                    percent,
+                    text=f"正在获取A股数据：{task_name} ({completed}/{total})",
+                )
+
+            stocks_df, stocks_errors = fetch_all_featured_stocks_data(
+                progress_callback=update_a_stock_progress,
+            )
             st.session_state.featured_stocks_data = stocks_df
             st.session_state.featured_stocks_errors = stocks_errors
             st.session_state.featured_stocks_source = 'api'  # 标记数据来源
@@ -750,16 +755,11 @@ with tab7:
             st.session_state.us_stocks_errors = us_errors
             st.session_state.us_stocks_source = 'preload'
         else:
-            # 预加载文件不存在，从 API 获取
-            try:
-                us_df, us_errors = fetch_all_us_stocks_data()
-                st.session_state.us_stocks_data = us_df
-                st.session_state.us_stocks_errors = us_errors
-                st.session_state.us_stocks_source = 'api'
-            except Exception as e:
-                st.session_state.us_stocks_data = None
-                st.session_state.us_stocks_errors = {'系统错误': str(e)}
-                st.session_state.us_stocks_source = 'api_error'
+            # Streamlit 会执行未激活标签页中的代码。预加载文件不存在时不在
+            # 首次打开应用时自动发起美股网络请求，改由刷新按钮显式加载。
+            st.session_state.us_stocks_data = None
+            st.session_state.us_stocks_errors = {}
+            st.session_state.us_stocks_source = 'not_loaded'
 
     # 显示数据来源标识
     us_data_source = st.session_state.get('us_stocks_source', 'unknown')
@@ -767,6 +767,8 @@ with tab7:
         st.caption("📁 当前显示：预加载数据 | 点击上方按钮获取最新数据")
     elif us_data_source == 'api':
         st.caption("🌐 当前显示：API 最新数据")
+    elif us_data_source == 'not_loaded':
+        st.caption("尚无美股预加载数据，请点击上方“刷新最新数据”从 API 获取")
 
     # 显示美股数据
     us_df = st.session_state.get('us_stocks_data')
@@ -800,4 +802,4 @@ with tab7:
         for name, err in us_errors.items():
             st.warning(f"⚠️ {name}: {err}")
     else:
-        st.info("数据加载中...")
+        st.info("点击上方“刷新最新数据”加载美股数据")

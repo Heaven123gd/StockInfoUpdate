@@ -40,6 +40,10 @@ class _UnavailableAkShare:
 
 try:
     import akshare as ak
+    # AKShare 1.20.65 改为通过全局配置设置超时，旧的 AKSHARE_TIMEOUT
+    # 环境变量已不再生效。云端 TLS 握手偶尔超过默认 10 秒。
+    if hasattr(ak, 'set_timeout'):
+        ak.set_timeout((20, 60))
 except Exception as exc:
     ak = _UnavailableAkShare(exc)
 
@@ -1762,6 +1766,7 @@ def fetch_stock_financial_abstract_ths_yearly(symbol: str) -> pd.DataFrame:
 
         metric_map = {
             'operating_income_total': '营业总收入',
+            'parent_holder_net_profit': '归母净利润',
             'calc_per_net_assets': '每股净资产',
             'sale_net_interest_ratio': '销售净利率',
             'sale_gross_margin': '销售毛利率',
@@ -1855,10 +1860,11 @@ def fetch_stock_financial_abstract_yearly(symbol: str) -> pd.DataFrame:
 
 def fetch_stock_balance_sheet_yearly(symbol: str) -> pd.DataFrame:
     """
-    获取资产负债表数据（多年年报）
+    获取单只股票的资产负债表数据（多年年报）。
 
-    数据结构: 返回指定日期所有股票的资产负债表，每行是一只股票
-    列名示例: '股票代码', '资产-应收账款', '资产-存货', '负债-应付账款' 等
+    使用同花顺单股年度接口，一次返回该股票的全部年度数据。旧实现会对
+    每个年度下载全市场约 5000 只股票的数据，再筛选当前股票，网络请求量
+    会随股票数重复放大。
 
     Args:
         symbol: 股票代码，如 '002594'
@@ -1866,34 +1872,191 @@ def fetch_stock_balance_sheet_yearly(symbol: str) -> pd.DataFrame:
     Returns:
         DataFrame: 包含多年的存货、应付账款、应收账款
     """
-    all_data = []
-    report_dates = get_annual_report_dates()
+    available_dates = {
+        f"{date[:4]}-{date[4:6]}-{date[6:]}"
+        for date in get_annual_report_dates()
+    }
+    metric_map = {
+        'inventory': '存货',
+        'accounts_payable': '应付账款',
+        'accounts_receivable': '应收账款',
+        'assets_total': '总资产',
+    }
 
-    for report_date in report_dates:
-        try:
-            df = ak.stock_zcfz_em(date=report_date)
-            if df.empty:
-                continue
+    ths_error = None
+    try:
+        df = retry_request(
+            lambda: ak.stock_balance_sheet_ths(
+                symbol=symbol,
+                indicator='按年度',
+            ),
+            max_retries=2,
+            delay=1,
+        )
+        if df.empty:
+            raise ValueError("同花顺资产负债表返回空数据")
 
-            # 筛选指定股票
-            stock_data = df[df['股票代码'] == symbol]
-            if stock_data.empty:
-                continue
+        required_columns = {'report_date', 'metric_name', 'value'}
+        missing_columns = required_columns.difference(df.columns)
+        if missing_columns:
+            raise ValueError(
+                f"同花顺资产负债表接口缺少必要列: {sorted(missing_columns)}"
+            )
 
-            row = stock_data.iloc[0]
-            year = report_date[:4]
+        annual_df = df[
+            df['report_date'].astype(str).isin(available_dates)
+            & df['metric_name'].isin(metric_map)
+        ][['report_date', 'metric_name', 'value']].copy()
+        if annual_df.empty:
+            return pd.DataFrame()
 
-            # 正确的列名（带"资产-"或"负债-"前缀）
-            all_data.append({
-                '报告期': f"{year}-12-31",
-                '存货': row.get('资产-存货', None),
-                '应付账款': row.get('负债-应付账款', None),
-                '应收账款': row.get('资产-应收账款', None),
-            })
-        except Exception:
-            continue
+        result_df = (
+            annual_df.drop_duplicates(['report_date', 'metric_name'])
+            .pivot(index='report_date', columns='metric_name', values='value')
+            .rename(columns=metric_map)
+            .rename_axis(columns=None)
+            .reset_index()
+            .rename(columns={'report_date': '报告期'})
+        )
+        value_columns = [col for col in metric_map.values() if col in result_df.columns]
+        for column in value_columns:
+            result_df[column] = _to_numeric_series(result_df[column])
 
-    return pd.DataFrame(all_data)
+        return (
+            result_df[['报告期', *value_columns]]
+            .sort_values('报告期')
+            .reset_index(drop=True)
+        )
+    except Exception as exc:
+        ths_error = exc
+
+    # 同花顺响应慢或限流时，使用东方财富单股年度资产负债表。该接口只请求
+    # 当前股票，仍远少于旧版按年度下载全市场数据的请求量。
+    try:
+        suffix = STOCK_EXCHANGE_SUFFIX.get(symbol, '.SZ').lstrip('.')
+        em_symbol = f"{suffix}{symbol}"
+        em_df = ak.stock_balance_sheet_by_yearly_em(symbol=em_symbol)
+        if em_df.empty:
+            raise ValueError("东方财富资产负债表返回空数据")
+
+        em_columns = {
+            'REPORT_DATE': '报告期',
+            'INVENTORY': '存货',
+            'ACCOUNTS_PAYABLE': '应付账款',
+            'ACCOUNTS_RECE': '应收账款',
+            'TOTAL_ASSETS': '总资产',
+        }
+        missing_columns = set(em_columns).difference(em_df.columns)
+        if missing_columns:
+            raise ValueError(
+                f"东方财富资产负债表缺少必要列: {sorted(missing_columns)}"
+            )
+
+        result_df = em_df[list(em_columns)].rename(columns=em_columns).copy()
+        result_df['报告期'] = result_df['报告期'].astype(str).str[:10]
+        result_df = result_df[result_df['报告期'].isin(available_dates)]
+        result_df = result_df.drop_duplicates('报告期')
+        for column in ('存货', '应付账款', '应收账款', '总资产'):
+            result_df[column] = _to_numeric_series(result_df[column])
+        return result_df.sort_values('报告期').reset_index(drop=True)
+    except Exception as em_error:
+        return pd.DataFrame({
+            'error': [
+                f"同花顺资产负债表失败: {ths_error}; "
+                f"东方财富资产负债表失败: {em_error}"
+            ]
+        })
+
+
+def fetch_stock_profit_sheet_yearly(symbol: str) -> pd.DataFrame:
+    """获取单只股票年度利润表中的营业总成本和净利润。"""
+    available_dates = {
+        f"{date[:4]}-{date[4:6]}-{date[6:]}"
+        for date in get_annual_report_dates()
+    }
+    metric_map = {
+        'operating_costs_total': '营业成本',
+        'net_profit': '净利润',
+    }
+
+    ths_error = None
+    try:
+        df = retry_request(
+            lambda: ak.stock_profit_sheet_ths(
+                symbol=symbol,
+                indicator='按年度',
+            ),
+            max_retries=2,
+            delay=1,
+        )
+        if df.empty:
+            raise ValueError("同花顺利润表返回空数据")
+
+        required_columns = {'report_date', 'metric_name', 'value'}
+        missing_columns = required_columns.difference(df.columns)
+        if missing_columns:
+            raise ValueError(
+                f"同花顺利润表接口缺少必要列: {sorted(missing_columns)}"
+            )
+
+        # 原项目“营业成本”取自新浪财务摘要中的营业总成本口径；同花顺
+        # 对应字段为 operating_costs_total，而非仅主营业务成本。
+        annual_df = df[
+            df['report_date'].astype(str).isin(available_dates)
+            & df['metric_name'].isin(metric_map)
+        ][['report_date', 'metric_name', 'value']].copy()
+        if annual_df.empty:
+            raise ValueError("同花顺利润表没有所需年度数据")
+
+        result_df = (
+            annual_df.drop_duplicates(['report_date', 'metric_name'])
+            .pivot(index='report_date', columns='metric_name', values='value')
+            .rename(columns=metric_map)
+            .rename_axis(columns=None)
+            .reset_index()
+            .rename(columns={'report_date': '报告期'})
+        )
+        value_columns = [col for col in metric_map.values() if col in result_df.columns]
+        for column in value_columns:
+            result_df[column] = _to_numeric_series(result_df[column])
+        return (
+            result_df[['报告期', *value_columns]]
+            .sort_values('报告期')
+            .reset_index(drop=True)
+        )
+    except Exception as exc:
+        ths_error = exc
+
+    try:
+        suffix = STOCK_EXCHANGE_SUFFIX.get(symbol, '.SZ').lstrip('.')
+        em_symbol = f"{suffix}{symbol}"
+        em_df = ak.stock_profit_sheet_by_yearly_em(symbol=em_symbol)
+        if em_df.empty:
+            raise ValueError("东方财富利润表返回空数据")
+
+        em_columns = {
+            'REPORT_DATE': '报告期',
+            'TOTAL_OPERATE_COST': '营业成本',
+            'NETPROFIT': '净利润',
+        }
+        missing_columns = set(em_columns).difference(em_df.columns)
+        if missing_columns:
+            raise ValueError(f"东方财富利润表缺少必要列: {sorted(missing_columns)}")
+
+        result_df = em_df[list(em_columns)].rename(columns=em_columns).copy()
+        result_df['报告期'] = result_df['报告期'].astype(str).str[:10]
+        result_df = result_df[result_df['报告期'].isin(available_dates)]
+        result_df = result_df.drop_duplicates('报告期')
+        for column in ('营业成本', '净利润'):
+            result_df[column] = _to_numeric_series(result_df[column])
+        return result_df.sort_values('报告期').reset_index(drop=True)
+    except Exception as em_error:
+        return pd.DataFrame({
+            'error': [
+                f"同花顺利润表失败: {ths_error}; "
+                f"东方财富利润表失败: {em_error}"
+            ]
+        })
 
 
 def fetch_stock_financial_indicator_yearly(symbol: str) -> pd.DataFrame:
@@ -1969,6 +2132,8 @@ def fetch_stock_financial_indicator_em_yearly(symbol: str) -> pd.DataFrame:
 
     数据结构: 每行对应一个报告期，列名为英文
     - REPORT_DATE: 报告日期 (datetime格式 如 2024-12-31 00:00:00)
+    - CHZZL: 存货周转率
+    - CHZZTS: 存货周转天数
     - YSZKZZL: 应收账款周转率
     - ACCOUNTS_PAYABLE_TR: 应付账款周转率
 
@@ -2012,110 +2177,126 @@ def fetch_stock_financial_indicator_em_yearly(symbol: str) -> pd.DataFrame:
         for _, row in annual_df.iterrows():
             row_data = {
                 '报告期': row.get('报告期_str', ''),
+                'EM_营业总收入': row.get('TOTALOPERATEREVE'),
+                'EM_归母净利润': row.get('PARENTNETPROFIT'),
+                'EM_每股净资产': row.get('BPS'),
+                'EM_销售净利率': row.get('XSJLL'),
+                'EM_销售毛利率': row.get('XSMLL'),
+                'EM_净资产收益率': row.get('ROEJQ'),
+                '存货周转率': row.get('CHZZL'),
+                '存货周转天数': row.get('CHZZTS'),
                 '应收账款周转率': row.get('YSZKZZL'),
                 '应付账款周转率': row.get('ACCOUNTS_PAYABLE_TR'),
+                '权益乘数': row.get('QYCS'),
             }
             result_data.append(row_data)
 
-        return pd.DataFrame(result_data)
+        result_df = pd.DataFrame(result_data)
+        for column in [
+            'EM_营业总收入', 'EM_归母净利润', 'EM_每股净资产',
+            'EM_销售净利率', 'EM_销售毛利率', 'EM_净资产收益率',
+            '存货周转率', '存货周转天数',
+            '应收账款周转率', '应付账款周转率', '权益乘数',
+        ]:
+            if column in result_df.columns:
+                result_df[column] = _to_numeric_series(result_df[column])
+        return result_df
     except Exception as e:
         return pd.DataFrame({'error': [str(e)]})
 
 
-def _fetch_single_stock_data(name: str, symbol: str) -> Tuple[pd.DataFrame, Dict]:
-    """
-    获取单只股票的基本面数据（用于并行请求）
-
-    Args:
-        name: 股票名称
-        symbol: 股票代码
-
-    Returns:
-        Tuple: (股票DataFrame, 错误信息Dict)
-    """
+def _merge_featured_stock_data(
+    name: str,
+    symbol: str,
+    results: Dict[str, pd.DataFrame],
+) -> Tuple[pd.DataFrame, Dict]:
+    """合并单只股票的各数据源结果，并计算可由现有字段得到的指标。"""
     errors = {}
+    frames = []
 
-    try:
-        # 使用 ThreadPoolExecutor 并行获取5个数据源
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    for source in ('ths', 'profit', 'balance', 'em'):
+        df = results.get(source, pd.DataFrame())
+        if df is None or df.empty:
+            continue
+        if 'error' in df.columns:
+            errors[f"{name}_{source}"] = str(df['error'].iloc[0])
+            continue
+        if '报告期' not in df.columns:
+            errors[f"{name}_{source}"] = f"数据缺少报告期字段: {list(df.columns)}"
+            continue
 
-        futures_map = {}
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures_map['ths'] = executor.submit(fetch_stock_financial_abstract_ths_yearly, symbol)
-            futures_map['sina'] = executor.submit(fetch_stock_financial_abstract_yearly, symbol)
-            futures_map['balance'] = executor.submit(fetch_stock_balance_sheet_yearly, symbol)
-            futures_map['indicator'] = executor.submit(fetch_stock_financial_indicator_yearly, symbol)
-            futures_map['em'] = executor.submit(fetch_stock_financial_indicator_em_yearly, symbol)
+        normalized = df.copy()
+        normalized['报告期'] = (
+            normalized['报告期'].astype(str).str.replace('-', '', regex=False).str[:8]
+        )
+        frames.append(normalized)
 
-        # 收集结果
-        results = {}
-        for key, future in futures_map.items():
-            try:
-                results[key] = future.result(timeout=30)
-            except Exception as e:
-                errors[f"{name}_{key}"] = str(e)
-                results[key] = pd.DataFrame()
+    if not frames:
+        return pd.DataFrame(), errors
 
-        # 处理结果
-        ths_df = results.get('ths', pd.DataFrame())
-        sina_df = results.get('sina', pd.DataFrame())
-        balance_df = results.get('balance', pd.DataFrame())
-        indicator_df = results.get('indicator', pd.DataFrame())
-        em_df = results.get('em', pd.DataFrame())
+    merged_df = frames[0]
+    for frame in frames[1:]:
+        merged_df = pd.merge(merged_df, frame, on='报告期', how='outer')
 
-        # 检查错误
-        if not ths_df.empty and 'error' in ths_df.columns:
-            errors[f"{name}_ths"] = ths_df['error'].iloc[0]
-            ths_df = pd.DataFrame()
-        if not sina_df.empty and 'error' in sina_df.columns:
-            errors[f"{name}_sina"] = sina_df['error'].iloc[0]
-            sina_df = pd.DataFrame()
-        if not indicator_df.empty and 'error' in indicator_df.columns:
-            errors[f"{name}_indicator"] = indicator_df['error'].iloc[0]
-            indicator_df = pd.DataFrame()
-        if not em_df.empty and 'error' in em_df.columns:
-            errors[f"{name}_em"] = em_df['error'].iloc[0]
-            em_df = pd.DataFrame()
+    # 东方财富主要指标作为同花顺主要指标的逐字段备用。正常情况下优先
+    # 保留同花顺值；同花顺限流或个别年份缺值时自动补齐。
+    for target in (
+        '营业总收入', '归母净利润', '每股净资产',
+        '销售净利率', '销售毛利率', '净资产收益率',
+    ):
+        fallback = f'EM_{target}'
+        if fallback not in merged_df.columns:
+            continue
+        fallback_values = _to_numeric_series(merged_df[fallback])
+        if target in merged_df.columns:
+            primary_values = _to_numeric_series(merged_df[target])
+            merged_df[target] = primary_values.combine_first(fallback_values)
+        else:
+            merged_df[target] = fallback_values
+        merged_df = merged_df.drop(columns=[fallback])
 
-        # 合并数据 - 以同花顺数据为基础，按报告期合并
-        if not ths_df.empty:
-            merged_df = ths_df.copy()
-            merged_df['报告期'] = merged_df['报告期'].astype(str).str.replace('-', '')
+    # 原新浪财务接口在云端容易超时。营业成本及成本率可由同花顺返回的
+    # 营业总收入和销售毛利率计算，避免额外请求新浪。
+    revenue_column = next(
+        (
+            column for column in ('营业总收入_y', '营业总收入', '营业总收入_x')
+            if column in merged_df.columns
+        ),
+        None,
+    )
+    cost = None
+    if '营业成本' in merged_df.columns:
+        cost = _to_numeric_series(merged_df['营业成本'])
+    elif revenue_column and '销售毛利率' in merged_df.columns:
+        revenue = _to_numeric_series(merged_df[revenue_column])
+        gross_margin = _to_numeric_series(merged_df['销售毛利率'])
+        cost = revenue * (1 - gross_margin / 100)
+        merged_df['营业成本'] = cost
 
-            if not sina_df.empty:
-                sina_df['报告期'] = sina_df['报告期'].astype(str).str.replace('-', '')
-                merged_df = pd.merge(merged_df, sina_df, on='报告期', how='outer')
+    if revenue_column and cost is not None:
+        revenue = _to_numeric_series(merged_df[revenue_column])
+        merged_df['主营业务成本率'] = np.where(
+            revenue > 0,
+            cost / revenue * 100,
+            np.nan,
+        )
 
-            if not balance_df.empty:
-                balance_df['报告期'] = balance_df['报告期'].astype(str).str.replace('-', '')
-                merged_df = pd.merge(merged_df, balance_df, on='报告期', how='outer')
+    if '存货周转率' in merged_df.columns:
+        turnover = _to_numeric_series(merged_df['存货周转率'])
+        merged_df['平均存货周期'] = np.where(
+            turnover > 0,
+            365 / turnover,
+            np.nan,
+        )
 
-            if not indicator_df.empty:
-                indicator_df['报告期'] = indicator_df['报告期'].astype(str).str.replace('-', '')
-                merged_df = pd.merge(merged_df, indicator_df, on='报告期', how='outer')
-
-            if not em_df.empty:
-                em_df['报告期'] = em_df['报告期'].astype(str).str.replace('-', '')
-                merged_df = pd.merge(merged_df, em_df, on='报告期', how='outer')
-
-            merged_df['股票名称'] = name
-            merged_df['股票代码'] = symbol
-            merged_df['报告期'] = merged_df['报告期'].apply(
-                lambda x: f"{str(x)[:4]}年年报" if len(str(x)) >= 8 else str(x)
-            )
-            return merged_df, errors
-        elif not sina_df.empty:
-            sina_df['股票名称'] = name
-            sina_df['股票代码'] = symbol
-            sina_df['报告期'] = sina_df['报告期'].apply(
-                lambda x: f"{str(x)[:4]}年年报" if len(str(x)) >= 8 else str(x)
-            )
-            return sina_df, errors
-
-    except Exception as e:
-        errors[name] = str(e)
-
-    return pd.DataFrame(), errors
+    merged_df['股票名称'] = name
+    merged_df['股票代码'] = symbol
+    merged_df['报告期'] = merged_df['报告期'].apply(
+        lambda value: (
+            f"{str(value)[:4]}年年报" if len(str(value)) >= 8 else str(value)
+        )
+    )
+    return merged_df, errors
 
 
 def fetch_all_featured_stocks_data(progress_callback=None) -> Tuple[pd.DataFrame, Dict]:
@@ -2123,40 +2304,113 @@ def fetch_all_featured_stocks_data(progress_callback=None) -> Tuple[pd.DataFrame
     获取所有重点关注股票的多年年报基本面数据（并行优化版本）
 
     Args:
-        progress_callback: 进度回调函数，接收 (当前进度, 总数, 股票名称)
+        progress_callback: 进度回调函数，接收 (已完成任务数, 总任务数, 任务名称)
 
     Returns:
         Tuple: (汇总DataFrame, 错误信息Dict)
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import (
+        ThreadPoolExecutor,
+        TimeoutError as FuturesTimeoutError,
+        as_completed,
+    )
+    from threading import BoundedSemaphore
 
     all_data = []
     errors = {}
     stocks_list = list(FEATURED_STOCKS.items())
-    total = len(stocks_list)
+    source_fetchers = {
+        'ths': ('同花顺主要指标', fetch_stock_financial_abstract_ths_yearly),
+        'profit': ('同花顺利润表', fetch_stock_profit_sheet_yearly),
+        'balance': ('同花顺资产负债表', fetch_stock_balance_sheet_yearly),
+        'em': ('东方财富周转指标', fetch_stock_financial_indicator_em_yearly),
+    }
+    results = {
+        (name, symbol): {}
+        for name, symbol in stocks_list
+    }
 
-    # 并行获取所有股票数据
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_stock = {
-            executor.submit(_fetch_single_stock_data, name, symbol): (name, symbol)
-            for name, symbol in stocks_list
-        }
+    # 使用单层线程池，避免原先 4 个股票线程各自再创建 5 个线程，降低上游
+    # 限速概率。整个批次最多等待 90 秒，超时任务不会继续阻塞页面。
+    ths_semaphore = BoundedSemaphore(3)
 
-        completed = 0
-        for future in as_completed(future_to_stock):
-            name, symbol = future_to_stock[future]
-            completed += 1
+    def run_fetcher(source, fetcher, symbol):
+        # 三个同花顺接口共用同一域名。限制为 3 路可避免同时建立过多 TLS
+        # 连接造成 EOF/限流；东方财富任务不受该限制。
+        if source in {'ths', 'profit', 'balance'}:
+            with ths_semaphore:
+                return fetcher(symbol)
+        return fetcher(symbol)
+
+    executor = ThreadPoolExecutor(max_workers=8)
+    future_map = {
+        executor.submit(run_fetcher, source, fetcher, symbol): (
+            name,
+            symbol,
+            source,
+            source_label,
+        )
+        for name, symbol in stocks_list
+        for source, (source_label, fetcher) in source_fetchers.items()
+    }
+    total_tasks = len(future_map)
+    completed_tasks = 0
+    handled_futures = set()
+
+    try:
+        for future in as_completed(future_map, timeout=90):
+            handled_futures.add(future)
+            name, symbol, source, source_label = future_map[future]
+            completed_tasks += 1
+            try:
+                results[(name, symbol)][source] = future.result()
+            except Exception as exc:
+                errors[f"{name}_{source}"] = str(exc)
+                results[(name, symbol)][source] = pd.DataFrame()
 
             if progress_callback:
-                progress_callback(completed, total, name)
+                progress_callback(
+                    completed_tasks,
+                    total_tasks,
+                    f"{name} · {source_label}",
+                )
+    except FuturesTimeoutError:
+        pass
+    finally:
+        for future, (name, symbol, source, source_label) in future_map.items():
+            if future in handled_futures:
+                continue
+            if future.done():
+                try:
+                    results[(name, symbol)][source] = future.result()
+                except Exception as exc:
+                    errors[f"{name}_{source}"] = str(exc)
+                    results[(name, symbol)][source] = pd.DataFrame()
+            else:
+                future.cancel()
+                errors[f"{name}_{source}"] = (
+                    f"{source_label} 获取超过 90 秒，已跳过本次结果"
+                )
+                results[(name, symbol)][source] = pd.DataFrame()
+            completed_tasks += 1
+            if progress_callback:
+                progress_callback(
+                    completed_tasks,
+                    total_tasks,
+                    f"{name} · {source_label}",
+                )
 
-            try:
-                stock_df, stock_errors = future.result(timeout=60)
-                errors.update(stock_errors)
-                if not stock_df.empty:
-                    all_data.append(stock_df)
-            except Exception as e:
-                errors[name] = str(e)
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    for name, symbol in stocks_list:
+        stock_df, stock_errors = _merge_featured_stock_data(
+            name,
+            symbol,
+            results[(name, symbol)],
+        )
+        errors.update(stock_errors)
+        if not stock_df.empty:
+            all_data.append(stock_df)
 
     # 合并所有股票数据
     if all_data:
